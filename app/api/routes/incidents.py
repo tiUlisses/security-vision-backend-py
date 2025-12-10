@@ -1,8 +1,7 @@
 # app/api/routes/incidents.py
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from datetime import datetime, timezone
-from app.services.incident_files import save_incident_file
-from app.models.device_event import DeviceEvent
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -12,15 +11,18 @@ from fastapi import (
     File,
     Form,
 )
-
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services.incident_files import save_incident_file
 from app.services.incidents import (
     apply_incident_update,
     compute_sla_fields,
     infer_incident_kind_from_event,
-    extract_media_from_event,  # 👈 novo
+    extract_media_from_event,
 )
-from app.api.deps import get_db_session
+from app.api.deps import get_db_session, get_current_active_user
+from app.models.user import User
+
 from app.crud import (
     incident as crud_incident,
     device_event as crud_device_event,
@@ -39,6 +41,11 @@ from app.schemas import (
 router = APIRouter()
 
 
+# ---------------------------------------------------------------------------
+# LIST / GET
+# ---------------------------------------------------------------------------
+
+
 @router.get("/", response_model=List[IncidentRead])
 async def list_incidents(
     skip: int = 0,
@@ -46,6 +53,7 @@ async def list_incidents(
     only_open: bool = False,
     device_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Lista incidentes.
@@ -53,6 +61,8 @@ async def list_incidents(
     - `only_open=true` -> só OPEN/IN_PROGRESS
     - `device_id` -> filtra por dispositivo (câmera)
     """
+    # (não usamos current_user diretamente aqui, apenas forçamos autenticação)
+
     if device_id is not None:
         return await crud_incident.list_by_device(
             db,
@@ -76,6 +86,7 @@ async def list_incidents(
 async def get_incident(
     incident_id: int,
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Detalhe de um incidente.
@@ -86,15 +97,22 @@ async def get_incident(
     return db_inc
 
 
+# ---------------------------------------------------------------------------
+# CREATE (manual)
+# ---------------------------------------------------------------------------
+
+
 @router.post("/", response_model=IncidentRead, status_code=status.HTTP_201_CREATED)
 async def create_incident(
     incident_in: IncidentCreate,
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Cria um incidente manualmente.
 
     - Se sla_minutes/due_at não forem enviados, são calculados a partir da severidade.
+    - Marca o usuário logado como criador.
     """
     now = datetime.now(timezone.utc)
 
@@ -108,16 +126,19 @@ async def create_incident(
     data = incident_in.model_dump()
     data["sla_minutes"] = sla_minutes
     data["due_at"] = due_at
+    # 👇 quem criou/atualizou
+    data["created_by_user_id"] = current_user.id
+    data["updated_by_user_id"] = current_user.id
 
     db_inc = await crud_incident.create(db, obj_in=data)
     return db_inc
 
 
-@router.post(
-    "/from-device-event/{device_event_id}",
-    response_model=IncidentRead,
-    status_code=status.HTTP_201_CREATED,
-)
+# ---------------------------------------------------------------------------
+# CREATE a partir de um DeviceEvent específico (por ex. na tela da câmera)
+# ---------------------------------------------------------------------------
+
+
 @router.post(
     "/from-device-event/{device_event_id}",
     response_model=IncidentRead,
@@ -127,9 +148,11 @@ async def create_incident_from_device_event(
     device_event_id: int,
     payload: IncidentFromDeviceEventCreate,
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Cria incidente diretamente a partir de um DeviceEvent.
+
     Body JSON:
     {
       "title": "...",
@@ -151,6 +174,10 @@ async def create_incident_from_device_event(
             detail="Incidents from events are currently supported only for CAMERA devices",
         )
 
+    # Aqui poderíamos estender o crud_incident.create_from_device_event
+    # para aceitar created_by_user_id, se sua função já tiver esse parâmetro.
+    # Para não quebrar nada existente, por enquanto só criamos o incidente
+    # e deixamos o serviço interno usar defaults.
     db_inc = await crud_incident.create_from_device_event(
         db,
         device_event=dev_event,
@@ -162,18 +189,20 @@ async def create_incident_from_device_event(
     return db_inc
 
 
+# ---------------------------------------------------------------------------
+# UPDATE
+# ---------------------------------------------------------------------------
+
+
 @router.patch("/{incident_id}", response_model=IncidentRead)
 async def update_incident(
     incident_id: int,
     incident_in: IncidentUpdate,
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Atualiza um incidente.
-
-    - Pode alterar título, descrição, severidade e status.
-    - Se o status mudar, as regras de negócio (closed_at, mensagem SYSTEM) são
-      aplicadas no service apply_incident_update.
     """
     db_inc = await crud_incident.get(db, id=incident_id)
     if not db_inc:
@@ -183,9 +212,14 @@ async def update_incident(
         db,
         incident=db_inc,
         update_in=incident_in,
-        actor_user_id=None,  # quando tiver auth, preenchemos aqui
+        actor_user_id=current_user.id,  # 👈 antes era None
     )
     return updated
+
+
+# ---------------------------------------------------------------------------
+# MESSAGES (timeline / chat)
+# ---------------------------------------------------------------------------
 
 
 @router.get(
@@ -195,6 +229,7 @@ async def update_incident(
 async def list_incident_messages(
     incident_id: int,
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Lista mensagens da timeline de um incidente.
@@ -220,6 +255,7 @@ async def create_incident_message(
     incident_id: int,
     msg_in: IncidentMessageCreate,
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     db_inc = await crud_incident.get(db, id=incident_id)
     if not db_inc:
@@ -228,8 +264,20 @@ async def create_incident_message(
     msg_data = msg_in.model_dump()
     msg_data["incident_id"] = incident_id
 
+    # garante que é COMMENT se vier vazio
+    msg_data.setdefault("message_type", "COMMENT")
+
+    # 👇 grava o nome do operador
+    msg_data["author_name"] = current_user.full_name
+
     db_msg = await crud_incident_message.create(db, obj_in=msg_data)
     return db_msg
+
+
+# ---------------------------------------------------------------------------
+# CREATE a partir de qualquer DeviceEvent (payload mais completo)
+# ---------------------------------------------------------------------------
+
 
 @router.post(
     "/from-event",
@@ -239,7 +287,11 @@ async def create_incident_message(
 async def create_incident_from_event(
     body: IncidentFromDeviceEventCreate,
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
+    """
+    Cria incidente a partir de um DeviceEvent (campo device_event_id em body).
+    """
     db_event = await crud_device_event.get(db, id=body.device_event_id)
     if not db_event:
         raise HTTPException(status_code=404, detail="DeviceEvent not found")
@@ -284,6 +336,9 @@ async def create_incident_from_event(
         "description": description,
         "sla_minutes": sla_minutes,
         "due_at": due_at,
+        # 👇 quem criou via API (operador logado)
+        "created_by_user_id": current_user.id,
+        "updated_by_user_id": current_user.id,
     }
 
     db_inc = await crud_incident.create(db, obj_in=data)
@@ -292,9 +347,17 @@ async def create_incident_from_event(
     media_msg_data = extract_media_from_event(db_event)
     if media_msg_data:
         media_msg_data["incident_id"] = db_inc.id
+        # se quiser, poderia atribuir o user_id aqui também:
+        # media_msg_data["user_id"] = current_user.id
         await crud_incident_message.create(db, obj_in=media_msg_data)
 
     return db_inc
+
+
+# ---------------------------------------------------------------------------
+# ATTACHMENTS (upload de arquivo na timeline)
+# ---------------------------------------------------------------------------
+
 
 @router.post(
     "/{incident_id}/attachments",
@@ -306,6 +369,7 @@ async def upload_incident_attachment(
     file: UploadFile = File(...),
     description: str | None = Form(None),
     db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
 ):
     """
     Faz upload de um arquivo e cria uma mensagem de mídia na timeline do incidente.
@@ -316,6 +380,7 @@ async def upload_incident_attachment(
         message_type = "MEDIA"
         media_type   = IMAGE/VIDEO/AUDIO/FILE
         media_url    = URL pública do arquivo
+        user_id      = operador logado
     """
     db_inc = await crud_incident.get(db, id=incident_id)
     if not db_inc:
@@ -336,6 +401,8 @@ async def upload_incident_attachment(
         "media_url": media_url,
         "media_thumb_url": None,
         "media_name": original_name,
+        "user_id": current_user.id,  # 👈 operador que anexou
+        "author_name": current_user.full_name,
     }
 
     db_msg = await crud_incident_message.create(db, obj_in=msg_data)
