@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, String, Text, text, Column
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
@@ -39,7 +39,7 @@ class IncidentMessage(Base):
         nullable=False,
         default="TEXT",
     )
-
+    author_name = Column(String(255), nullable=True)
     # Conteúdo principal (texto)
     content: Mapped[str] = mapped_column(
         Text,

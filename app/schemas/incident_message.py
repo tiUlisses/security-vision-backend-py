@@ -25,15 +25,27 @@ class IncidentMessageCreate(BaseModel):
     """
     message_type: str = Field("TEXT", max_length=32)
     content: str = Field(..., max_length=8000)
-
+    author_name: Optional[str] = None   
     media_type: Optional[str] = Field(None, max_length=32)
     media_url: Optional[str] = None
     media_thumb_url: Optional[str] = None
     media_name: Optional[str] = Field(None, max_length=255)
 
 
-class IncidentMessageRead(IncidentMessageBase):
+class IncidentMessageRead(BaseModel):
     id: int
+    incident_id: int
+    message_type: str
+    content: Optional[str] = None
+
+    media_type: Optional[str] = None
+    media_url: Optional[str] = None
+    media_thumb_url: Optional[str] = None
+    media_name: Optional[str] = None
+
+    # 👇 NOVO
+    author_name: Optional[str] = None
+
     created_at: datetime
 
     class Config:
