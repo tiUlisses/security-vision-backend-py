@@ -1,0 +1,342 @@
+# app/api/routes/incidents.py
+from typing import List, Optional, Tuple
+from datetime import datetime, timezone
+from app.services.incident_files import save_incident_file
+from app.models.device_event import DeviceEvent
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    UploadFile,
+    File,
+    Form,
+)
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.incidents import (
+    apply_incident_update,
+    compute_sla_fields,
+    infer_incident_kind_from_event,
+    extract_media_from_event,  # 👈 novo
+)
+from app.api.deps import get_db_session
+from app.crud import (
+    incident as crud_incident,
+    device_event as crud_device_event,
+    device as crud_device,
+    incident_message as crud_incident_message,
+)
+from app.schemas import (
+    IncidentCreate,
+    IncidentRead,
+    IncidentUpdate,
+    IncidentFromDeviceEventCreate,
+    IncidentMessageCreate,
+    IncidentMessageRead,
+)
+
+router = APIRouter()
+
+
+@router.get("/", response_model=List[IncidentRead])
+async def list_incidents(
+    skip: int = 0,
+    limit: int = 100,
+    only_open: bool = False,
+    device_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Lista incidentes.
+
+    - `only_open=true` -> só OPEN/IN_PROGRESS
+    - `device_id` -> filtra por dispositivo (câmera)
+    """
+    if device_id is not None:
+        return await crud_incident.list_by_device(
+            db,
+            device_id=device_id,
+            only_open=only_open,
+            skip=skip,
+            limit=limit,
+        )
+
+    if only_open:
+        return await crud_incident.list_open(
+            db,
+            skip=skip,
+            limit=limit,
+        )
+
+    return await crud_incident.get_multi(db, skip=skip, limit=limit)
+
+
+@router.get("/{incident_id}", response_model=IncidentRead)
+async def get_incident(
+    incident_id: int,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Detalhe de um incidente.
+    """
+    db_inc = await crud_incident.get(db, id=incident_id)
+    if not db_inc:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return db_inc
+
+
+@router.post("/", response_model=IncidentRead, status_code=status.HTTP_201_CREATED)
+async def create_incident(
+    incident_in: IncidentCreate,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Cria um incidente manualmente.
+
+    - Se sla_minutes/due_at não forem enviados, são calculados a partir da severidade.
+    """
+    now = datetime.now(timezone.utc)
+
+    sla_minutes, due_at = compute_sla_fields(
+        severity=incident_in.severity,
+        sla_minutes=incident_in.sla_minutes,
+        due_at=incident_in.due_at,
+        now=now,
+    )
+
+    data = incident_in.model_dump()
+    data["sla_minutes"] = sla_minutes
+    data["due_at"] = due_at
+
+    db_inc = await crud_incident.create(db, obj_in=data)
+    return db_inc
+
+
+@router.post(
+    "/from-device-event/{device_event_id}",
+    response_model=IncidentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+@router.post(
+    "/from-device-event/{device_event_id}",
+    response_model=IncidentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_incident_from_device_event(
+    device_event_id: int,
+    payload: IncidentFromDeviceEventCreate,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Cria incidente diretamente a partir de um DeviceEvent.
+    Body JSON:
+    {
+      "title": "...",
+      "description": "...",
+      "severity": "LOW|MEDIUM|HIGH|CRITICAL"
+    }
+    """
+    dev_event = await crud_device_event.get(db, id=device_event_id)
+    if not dev_event:
+        raise HTTPException(status_code=404, detail="DeviceEvent not found")
+
+    device = await crud_device.get(db, id=dev_event.device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    if device.type != "CAMERA":
+        raise HTTPException(
+            status_code=400,
+            detail="Incidents from events are currently supported only for CAMERA devices",
+        )
+
+    db_inc = await crud_incident.create_from_device_event(
+        db,
+        device_event=dev_event,
+        title=payload.title,
+        description=payload.description,
+        severity=payload.severity,
+        kind="CAMERA_ISSUE",
+    )
+    return db_inc
+
+
+@router.patch("/{incident_id}", response_model=IncidentRead)
+async def update_incident(
+    incident_id: int,
+    incident_in: IncidentUpdate,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Atualiza um incidente.
+
+    - Pode alterar título, descrição, severidade e status.
+    - Se o status mudar, as regras de negócio (closed_at, mensagem SYSTEM) são
+      aplicadas no service apply_incident_update.
+    """
+    db_inc = await crud_incident.get(db, id=incident_id)
+    if not db_inc:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    updated = await apply_incident_update(
+        db,
+        incident=db_inc,
+        update_in=incident_in,
+        actor_user_id=None,  # quando tiver auth, preenchemos aqui
+    )
+    return updated
+
+
+@router.get(
+    "/{incident_id}/messages",
+    response_model=list[IncidentMessageRead],
+)
+async def list_incident_messages(
+    incident_id: int,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Lista mensagens da timeline de um incidente.
+    """
+    db_inc = await crud_incident.get(db, id=incident_id)
+    if not db_inc:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    msgs = await crud_incident_message.list_by_incident(
+        db,
+        incident_id=incident_id,
+        limit=500,
+    )
+    return msgs
+
+
+@router.post(
+    "/{incident_id}/messages",
+    response_model=IncidentMessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_incident_message(
+    incident_id: int,
+    msg_in: IncidentMessageCreate,
+    db: AsyncSession = Depends(get_db_session),
+):
+    db_inc = await crud_incident.get(db, id=incident_id)
+    if not db_inc:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    msg_data = msg_in.model_dump()
+    msg_data["incident_id"] = incident_id
+
+    db_msg = await crud_incident_message.create(db, obj_in=msg_data)
+    return db_msg
+
+@router.post(
+    "/from-event",
+    response_model=IncidentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_incident_from_event(
+    body: IncidentFromDeviceEventCreate,
+    db: AsyncSession = Depends(get_db_session),
+):
+    db_event = await crud_device_event.get(db, id=body.device_event_id)
+    if not db_event:
+        raise HTTPException(status_code=404, detail="DeviceEvent not found")
+
+    db_device = await crud_device.get(db, id=db_event.device_id)
+    if not db_device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    severity = (body.severity or "MEDIUM").upper()
+
+    default_title = f"Incidente de câmera (evento {db_event.analytic_type})"
+    title = body.title or default_title
+
+    default_description = (
+        f"Incidente gerado automaticamente a partir do evento {db_event.id} "
+        f"({db_event.analytic_type}) do dispositivo {db_device.name}."
+    )
+    description = body.description or default_description
+
+    tenant = body.tenant
+    payload = db_event.payload or {}
+    if tenant is None and isinstance(payload, dict):
+        tenant = payload.get("tenant")
+
+    kind = infer_incident_kind_from_event(db_event)
+
+    now = datetime.now(timezone.utc)
+    sla_minutes, due_at = compute_sla_fields(
+        severity=severity,
+        sla_minutes=body.sla_minutes,
+        now=now,
+    )
+
+    data = {
+        "device_id": db_event.device_id,
+        "device_event_id": db_event.id,
+        "kind": kind,
+        "tenant": tenant,
+        "status": "OPEN",
+        "severity": severity,
+        "title": title,
+        "description": description,
+        "sla_minutes": sla_minutes,
+        "due_at": due_at,
+    }
+
+    db_inc = await crud_incident.create(db, obj_in=data)
+
+    # 🔹 Tenta criar mensagem de mídia (snapshot) se houver info no payload
+    media_msg_data = extract_media_from_event(db_event)
+    if media_msg_data:
+        media_msg_data["incident_id"] = db_inc.id
+        await crud_incident_message.create(db, obj_in=media_msg_data)
+
+    return db_inc
+
+@router.post(
+    "/{incident_id}/attachments",
+    response_model=IncidentMessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_incident_attachment(
+    incident_id: int,
+    file: UploadFile = File(...),
+    description: str | None = Form(None),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Faz upload de um arquivo e cria uma mensagem de mídia na timeline do incidente.
+
+    - Salva o arquivo em disco (ou MinIO, se você trocar a implementação).
+    - Detecta media_type (IMAGE/VIDEO/AUDIO/FILE) pelo content-type.
+    - Cria IncidentMessage:
+        message_type = "MEDIA"
+        media_type   = IMAGE/VIDEO/AUDIO/FILE
+        media_url    = URL pública do arquivo
+    """
+    db_inc = await crud_incident.get(db, id=incident_id)
+    if not db_inc:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    media_url, media_type, original_name = await save_incident_file(
+        incident_id=incident_id,
+        file=file,
+    )
+
+    content = description or f"Arquivo anexado: {original_name}"
+
+    msg_data = {
+        "incident_id": incident_id,
+        "message_type": "MEDIA",
+        "content": content,
+        "media_type": media_type,
+        "media_url": media_url,
+        "media_thumb_url": None,
+        "media_name": original_name,
+    }
+
+    db_msg = await crud_incident_message.create(db, obj_in=msg_data)
+    return db_msg
