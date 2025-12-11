@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Optional
 
 from sqlalchemy import (
     Boolean,
@@ -17,10 +17,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
 
-if TYPE_CHECKING:
-    from app.models.device import Device
-    from app.models.user import User
-
 
 class IncidentRule(Base):
     __tablename__ = "incident_rules"
@@ -28,57 +24,60 @@ class IncidentRule(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
-    # Nome da regra (ex.: "FaceRecognized - Entrada")
-    name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    # Nome amigável da regra
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Analítico que dispara a regra (ex.: "faceRecognized", "FaceDetection")
-    analytic_type: Mapped[str] = mapped_column(
-        String(128),
+    # Ativa / inativa
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
         nullable=False,
+        server_default=text("true"),
         index=True,
     )
 
-    # Se preenchido, a regra vale apenas para essa câmera específica.
-    # Se for NULL, vale para qualquer câmera que gere esse analítico.
-    device_id: Mapped[int | None] = mapped_column(
-        ForeignKey("devices.id", ondelete="CASCADE"),
+    # Filtro principal: tipo de analítico (FaceRecognized, FaceDetection, Intrusion, etc.)
+    # Se for NULL, significaria "qualquer analítico" (podemos suportar isso depois).
+    analytic_type: Mapped[Optional[str]] = mapped_column(
+        String(128),
         nullable=True,
         index=True,
     )
 
-    # Severidade padrão dos incidentes criados por esta regra
+    # Escopo da regra: específica de uma câmera (device) ou genérica (NULL = qualquer câmera)
+    device_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # Tenant opcional
+    tenant: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+
+    # Severidade padrão para incidentes criados por esta regra
     severity: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
         default="MEDIUM",
     )
 
-    # Templates de título/descrição do incidente criado
-    # placeholders suportados: {analytic_type}, {camera_name}, {device_id},
-    # {device_code}, {building}, {floor}
-    title_template: Mapped[str | None] = mapped_column(
+    # Templates de título/descrição (usados com .format(**ctx) no service)
+    title_template: Mapped[Optional[str]] = mapped_column(
         String(255),
         nullable=True,
     )
-
-    description_template: Mapped[str | None] = mapped_column(
+    description_template: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
     )
 
-    # Operador para o qual o incidente será atribuído automaticamente (opcional)
-    assigned_to_user_id: Mapped[int | None] = mapped_column(
+    # Usuário para o qual o incidente será atribuído automaticamente (opcional)
+    assigned_to_user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
-    )
-
-    # Se false, a regra é ignorada
-    is_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        server_default=text("true"),
-        default=True,
-        index=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -94,5 +93,8 @@ class IncidentRule(Base):
     )
 
     # Relações
-    device: Mapped["Device"] | None = relationship("Device")
-    assigned_to_user: Mapped["User"] | None = relationship("User")
+    device = relationship("Device")
+    assigned_to = relationship(
+        "User",
+        foreign_keys=[assigned_to_user_id],
+    )

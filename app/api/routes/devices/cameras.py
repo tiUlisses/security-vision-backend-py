@@ -4,7 +4,6 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
-from app.services.incident_auto_rules import auto_create_incidents_for_event
 from app.api.deps import get_db_session
 from app.core.config import settings
 from app.crud import device as crud_device
@@ -139,22 +138,23 @@ async def create_device_event_for_camera(
     event_in: DeviceEventCreate,
     db: AsyncSession = Depends(get_db_session),
 ):
-    # 1) garante que o device existe e é CAMERA
-    db_obj = await crud_device.get(db, id=camera_id)
-    if not db_obj or db_obj.type != "CAMERA":
+    """
+    Cria um DeviceEvent para a câmera e dispara avaliação das regras de incidente
+    (via CRUDDeviceEvent.create).
+    """
+    # garante que a câmera existe e é CAMERA
+    db_cam = await crud_device.get(db, id=camera_id)
+    if not db_cam or db_cam.type != "CAMERA":
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    # 2) cria o DeviceEvent
-    data = event_in.dict(exclude_unset=True)
+    data = event_in.model_dump()
+    # independentemente do que vier no body, forçamos o device_id = camera_id
     data["device_id"] = camera_id
 
+    # 👇 aqui o CRUD já vai disparar apply_incident_rules_for_event internamente
     db_event = await crud_device_event.create(db, obj_in=data)
 
-    # 3) aplica regras de incidentes automáticos
-    await auto_create_incidents_for_event(db, db_event)
-
     return db_event
-
 
 @router.get("/{camera_id}/events", response_model=List[DeviceEventRead])
 async def list_device_events(
