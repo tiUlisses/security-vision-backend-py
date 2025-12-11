@@ -5,6 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
 from urllib.request import urlopen
+from urllib.parse import urlparse
+import mimetypes
+import os
+import uuid
+from tempfile import SpooledTemporaryFile
+
 from fastapi import UploadFile
 
 from app.core.config import settings
@@ -81,10 +87,17 @@ async def save_incident_file(
         base_url = base_url.rstrip("/")
         media_url = f"{base_url}/incidents/{incident_id}/{filename}"
     else:
-        # vai ser servido em /media/... (vamos montar já já)
+        # vai ser servido em /media/...
         media_url = f"/media/incidents/{incident_id}/{filename}"
 
-    media_type = guess_media_type_from_content_type(file.content_type)
+    # 🔹 Em vez de depender de file.content_type (que pode não existir ou ser read-only),
+    # tentamos primeiro pegar, e se não vier, inferimos pelo nome do arquivo.
+    content_type = getattr(file, "content_type", None)
+    if not content_type:
+        guessed, _ = mimetypes.guess_type(original_name)
+        content_type = guessed or "application/octet-stream"
+
+    media_type = guess_media_type_from_content_type(content_type)
 
     return media_url, media_type, original_name
 
@@ -93,40 +106,36 @@ async def save_incident_image_from_url(
     incident_id: int,
     url: str,
     filename_hint: str | None = None,
-) -> tuple[str, str, str]:
+) -> Tuple[str, str, str]:
     """
-    Faz download de uma imagem remota (SnapshotURL, foto de face, etc.)
-    e salva usando a mesma lógica de save_incident_file.
+    Faz download de uma imagem via HTTP e delega para save_incident_file.
 
-    Retorna (media_url, media_type, original_name).
+    Retorna (media_url, media_type, original_name)
     """
-    # Download síncrono simples – como é algo pontual por incidente,
-    # em geral é aceitável. Se depois quiser, trocamos para httpx/anyio.
+    # 1) Baixa o binário da imagem
     resp = urlopen(url)
-    content = resp.read()
-    content_type = resp.info().get_content_type() or "image/jpeg"
+    data = resp.read()
 
-    ext = mimetypes.guess_extension(content_type) or ".jpg"
-
-    if filename_hint:
-        original_name = filename_hint
-    else:
+    # 2) Define um nome de arquivo amigável
+    if not filename_hint:
         parsed = urlparse(url)
-        original_name = parsed.path.rsplit("/", 1)[-1] or "image"
+        basename = os.path.basename(parsed.path)
+        if not basename:
+            basename = f"snapshot-{uuid.uuid4().hex}.jpg"
+        filename_hint = basename
 
-    if "." not in original_name:
-        original_name = f"{original_name}{ext}"
+    # 3) Cria um arquivo temporário em memória
+    f = SpooledTemporaryFile()
+    f.write(data)
+    f.seek(0)
 
-    upload = UploadFile(
-        filename=original_name,
-        file=BytesIO(content),
-        content_type=content_type,
-    )
+    # 4) Cria um UploadFile *sem* mexer em content_type
+    upload = UploadFile(filename=filename_hint, file=f)
 
-    # reaproveita toda a lógica já existente de path/URL em save_incident_file
-    media_url, media_type, saved_name = await save_incident_file(
+    # 5) Reaproveita a função de upload já existente
+    media_url, media_type, original_name = await save_incident_file(
         incident_id=incident_id,
         file=upload,
     )
 
-    return media_url, media_type, saved_name
+    return media_url, media_type, original_name

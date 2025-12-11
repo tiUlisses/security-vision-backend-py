@@ -9,7 +9,7 @@ from typing import Optional
 from datetime import datetime, timezone
 from asyncio_mqtt import Client, MqttError
 from sqlalchemy import select
-
+from app.crud.device_event import device_event as crud_device_event
 from app.core.config import settings
 from app.models.device import Device
 from app.models.device_topic import DeviceTopic
@@ -317,23 +317,23 @@ async def _handle_message(topic: str, payload: bytes) -> None:
                 device.last_seen_at = occurred_at_naive
 
             # 3) Grava evento em device_events usando o mesmo occurred_at_naive
-            ev = DeviceEvent(
-                device_id=device.id,
-                topic=topic,
-                analytic_type=analytic_type,
-                payload=data,
-                occurred_at=occurred_at_naive,
-            )
-            db.add(ev)
+            event_data = {
+                "device_id": device.id,
+                "topic": topic,
+                "analytic_type": analytic_type,
+                "payload": data,
+                "occurred_at": occurred_at_naive,
+            }
 
-            await db.commit()
+            db_event = await crud_device_event.create(db, obj_in=event_data)
 
             logger.info(
-                "[cambus] evento gravado: device_id=%s kind=%s analytic=%s topic=%s",
+                "[cambus] evento gravado: device_id=%s kind=%s analytic=%s topic=%s event_id=%s",
                 device.id,
                 kind,
                 analytic_type,
                 topic,
+                db_event.id,
             )
     except RuntimeError as exc:
         logger.error("[cambus] não foi possível abrir sessão de banco: %s", exc)
