@@ -147,3 +147,9 @@ class Device(Base):
         back_populates="device",
         cascade="all, delete-orphan",
     )
+    camera_groups = relationship(
+        "CameraGroup",
+        secondary="camera_group_devices",
+        back_populates="devices",
+        lazy="selectin",
+    )
