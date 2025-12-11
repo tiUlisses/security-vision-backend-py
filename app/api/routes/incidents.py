@@ -13,7 +13,11 @@ from fastapi import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.incident_files import save_incident_file
+from app.services.incident_files import (
+    save_incident_file,
+    save_incident_image_from_url,  # 👈 novo
+)
+
 from app.services.incidents import (
     apply_incident_update,
     compute_sla_fields,
@@ -110,9 +114,6 @@ async def create_incident(
 ):
     """
     Cria um incidente manualmente.
-
-    - Se sla_minutes/due_at não forem enviados, são calculados a partir da severidade.
-    - Marca o usuário logado como criador.
     """
     now = datetime.now(timezone.utc)
 
@@ -126,9 +127,9 @@ async def create_incident(
     data = incident_in.model_dump()
     data["sla_minutes"] = sla_minutes
     data["due_at"] = due_at
-    # 👇 quem criou/atualizou
     data["created_by_user_id"] = current_user.id
-    data["updated_by_user_id"] = current_user.id
+    # ❌ NÃO usar updated_by_user_id, pois não existe no modelo
+    # data["updated_by_user_id"] = current_user.id
 
     db_inc = await crud_incident.create(db, obj_in=data)
     return db_inc
@@ -291,7 +292,16 @@ async def create_incident_from_event(
 ):
     """
     Cria incidente a partir de um DeviceEvent (campo device_event_id em body).
+
+    - Usa o device_event_id para achar o evento da câmera.
+    - Monta título/descrição default se não vierem no body.
+    - Calcula SLA/due_at a partir da severidade.
+    - Salva o incidente com status OPEN e marca o usuário logado como criador.
+    - Extrai URLs de snapshot/face do payload (via extract_media_from_event),
+      baixa os arquivos (save_incident_image_from_url) e cria mensagens de mídia
+      na timeline do incidente.
     """
+    # 1) Carrega o evento e o dispositivo
     db_event = await crud_device_event.get(db, id=body.device_event_id)
     if not db_event:
         raise HTTPException(status_code=404, detail="DeviceEvent not found")
@@ -300,6 +310,7 @@ async def create_incident_from_event(
     if not db_device:
         raise HTTPException(status_code=404, detail="Device not found")
 
+    # 2) Severidade / título / descrição
     severity = (body.severity or "MEDIUM").upper()
 
     default_title = f"Incidente de câmera (evento {db_event.analytic_type})"
@@ -311,13 +322,16 @@ async def create_incident_from_event(
     )
     description = body.description or default_description
 
+    # 3) Tenant (se existir no payload ou no body)
     tenant = body.tenant
     payload = db_event.payload or {}
     if tenant is None and isinstance(payload, dict):
         tenant = payload.get("tenant")
 
+    # 4) Tipo de incidente (kind) derivado do evento
     kind = infer_incident_kind_from_event(db_event)
 
+    # 5) SLA / due_at
     now = datetime.now(timezone.utc)
     sla_minutes, due_at = compute_sla_fields(
         severity=severity,
@@ -325,7 +339,8 @@ async def create_incident_from_event(
         now=now,
     )
 
-    data = {
+    # 6) Monta o dicionário para criar o incidente
+    incident_data = {
         "device_id": db_event.device_id,
         "device_event_id": db_event.id,
         "kind": kind,
@@ -336,20 +351,61 @@ async def create_incident_from_event(
         "description": description,
         "sla_minutes": sla_minutes,
         "due_at": due_at,
-        # 👇 quem criou via API (operador logado)
+        # 👇 operador que criou o incidente
         "created_by_user_id": current_user.id,
-        "updated_by_user_id": current_user.id,
     }
 
-    db_inc = await crud_incident.create(db, obj_in=data)
+    # 7) Cria o incidente
+    db_inc = await crud_incident.create(db, obj_in=incident_data)
 
-    # 🔹 Tenta criar mensagem de mídia (snapshot) se houver info no payload
-    media_msg_data = extract_media_from_event(db_event)
-    if media_msg_data:
-        media_msg_data["incident_id"] = db_inc.id
-        # se quiser, poderia atribuir o user_id aqui também:
-        # media_msg_data["user_id"] = current_user.id
-        await crud_incident_message.create(db, obj_in=media_msg_data)
+    # 8) Extrai descritores de mídia (snapshot, face cadastrada etc.) do evento
+    #    Aqui assumimos que extract_media_from_event retorna uma LISTA de dicts:
+    #    [
+    #       {
+    #          "source_url": "http://...",
+    #          "label": "Texto para a mensagem",
+    #          "filename_hint": "snapshot.jpg"  # opcional
+    #       },
+    #       ...
+    #    ]
+    media_descriptors = extract_media_from_event(db_event) or []
+
+    for media in media_descriptors:
+        url = media.get("source_url")
+        if not url:
+            continue
+
+        try:
+            # 9) Baixa a imagem para o storage do incidente
+            media_url, media_type, original_name = await save_incident_image_from_url(
+                incident_id=db_inc.id,
+                url=url,
+                filename_hint=media.get("filename_hint"),
+            )
+        except Exception as exc:
+            # Não quebra a criação do incidente se falhar o download;
+            # apenas loga e segue para a próxima mídia.
+            print(
+                f"[incidents] Falha ao baixar mídia '{url}' "
+                f"para incidente {db_inc.id}: {exc}"
+            )
+            continue
+
+        # 10) Cria mensagem de mídia na timeline
+        msg_data = {
+            "incident_id": db_inc.id,
+            "message_type": "MEDIA",
+            "media_type": media_type or "IMAGE",
+            "media_url": media_url,
+            "media_thumb_url": None,
+            "media_name": original_name,
+            # Texto descritivo (ex.: "Pessoa reconhecida Fulano (97.5%)"
+            "content": media.get("label") or "",
+            # Autor "Sistema", já que é gerado automaticamente
+            "author_name": "Sistema",
+        }
+
+        await crud_incident_message.create(db, obj_in=msg_data)
 
     return db_inc
 
@@ -373,14 +429,6 @@ async def upload_incident_attachment(
 ):
     """
     Faz upload de um arquivo e cria uma mensagem de mídia na timeline do incidente.
-
-    - Salva o arquivo em disco (ou MinIO, se você trocar a implementação).
-    - Detecta media_type (IMAGE/VIDEO/AUDIO/FILE) pelo content-type.
-    - Cria IncidentMessage:
-        message_type = "MEDIA"
-        media_type   = IMAGE/VIDEO/AUDIO/FILE
-        media_url    = URL pública do arquivo
-        user_id      = operador logado
     """
     db_inc = await crud_incident.get(db, id=incident_id)
     if not db_inc:
@@ -401,7 +449,7 @@ async def upload_incident_attachment(
         "media_url": media_url,
         "media_thumb_url": None,
         "media_name": original_name,
-        "user_id": current_user.id,  # 👈 operador que anexou
+        # ✅ apenas o nome do autor, sem user_id
         "author_name": current_user.full_name,
     }
 
