@@ -19,31 +19,36 @@ class CRUDIncidentRule(
         *,
         event: DeviceEvent,
     ) -> List[IncidentRule]:
-        """
-        Retorna regras ativas que se aplicam a este DeviceEvent.
+        analytic = (event.analytic_type or "").strip()
 
-        Critérios (v1):
-        - is_enabled = true
-        - analytic_type (case-insensitive) == event.analytic_type
-        - (device_id IS NULL) OU (device_id == event.device_id)
-        """
+        print(
+            f"[incident-rules] procurando regras para "
+            f"analytic='{analytic}', device_id={event.device_id}"
+        )
 
-        analytic = (event.analytic_type or "").lower()
+        stmt = select(IncidentRule).where(IncidentRule.enabled.is_(True))
 
-        stmt = (
-            select(IncidentRule)
-            .where(IncidentRule.is_enabled.is_(True))
-            .where(func.lower(IncidentRule.analytic_type) == analytic)
-            .where(
-                or_(
-                    IncidentRule.device_id.is_(None),
-                    IncidentRule.device_id == event.device_id,
-                )
+        if analytic:
+            stmt = stmt.where(IncidentRule.analytic_type == analytic)
+        else:
+            stmt = stmt.where(IncidentRule.analytic_type.is_(None))
+
+        stmt = stmt.where(
+            or_(
+                IncidentRule.device_id.is_(None),
+                IncidentRule.device_id == event.device_id,
             )
         )
 
         result = await db.execute(stmt)
-        return result.scalars().all()
+        rules = result.scalars().all()
+
+        print(
+            f"[incident-rules] encontradas {len(rules)} regras compatíveis "
+            f"para analytic='{analytic}', device_id={event.device_id}"
+        )
+
+        return rules
 
 
 incident_rule = CRUDIncidentRule(IncidentRule)
