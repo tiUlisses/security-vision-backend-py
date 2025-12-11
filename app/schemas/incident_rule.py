@@ -38,6 +38,7 @@ class IncidentRuleUpdate(BaseModel):
 
     analytic_type: Optional[str] = None
     device_id: Optional[int] = None
+    camera_group_id: Optional[int] = None
     tenant: Optional[str] = None
 
     severity: Optional[str] = None

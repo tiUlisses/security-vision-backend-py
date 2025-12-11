@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     text,
+    Column
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -91,9 +92,15 @@ class IncidentRule(Base):
         nullable=False,
         server_default=text("CURRENT_TIMESTAMP"),
     )
+    camera_group_id = Column(
+        Integer,
+        ForeignKey("camera_groups.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Relações
     device = relationship("Device")
+    camera_group = relationship("CameraGroup", lazy="selectin")
     assigned_to = relationship(
         "User",
         foreign_keys=[assigned_to_user_id],

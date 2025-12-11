@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from .base import router as base_router
 from .gateways import router as gateways_router
 from .cameras import router as cameras_router
+from .camera_groups import router as camera_groups_router
 
 router = APIRouter()
 
@@ -15,3 +16,6 @@ router.include_router(gateways_router, prefix="/gateways", tags=["RTLS Gateways"
 
 # Rotas específicas de Câmeras
 router.include_router(cameras_router, prefix="/cameras", tags=["Cameras"])
+
+# Rotas específicas de Camera Groups
+router.include_router(camera_groups_router, prefix="/camera-groups", tags=["Camera Groups"])

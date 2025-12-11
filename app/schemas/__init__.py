@@ -116,6 +116,11 @@ from .incident_rule import (
     IncidentRuleRead,
 
 )
+from .camera_group import (
+    CameraGroupCreate,
+    CameraGroupRead,
+    CameraGroupUpdate,
+)
 
 __all__ = [
     "BuildingBase",
@@ -204,9 +209,9 @@ __all__ = [
     "IncidentRuleRead",
     "DeviceEventCreate",
     "DeviceEventRead",
-
-    
-    
+    "CameraGroupCreate",
+    "CameraGroupRead",
+    "CameraGroupUpdate",
     
 
 ]
