@@ -1,6 +1,11 @@
 # app/api/routes/incidents.py
 from typing import List, Optional
 from datetime import datetime, timezone
+import asyncio
+import mimetypes
+import uuid
+from tempfile import SpooledTemporaryFile
+from urllib.request import urlopen
 
 from fastapi import (
     APIRouter,
@@ -41,6 +46,7 @@ from app.schemas import (
     IncidentMessageCreate,
     IncidentMessageRead,
 )
+
 
 router = APIRouter()
 
@@ -293,15 +299,10 @@ async def create_incident_from_event(
     """
     Cria incidente a partir de um DeviceEvent (campo device_event_id em body).
 
-    - Usa o device_event_id para achar o evento da câmera.
-    - Monta título/descrição default se não vierem no body.
-    - Calcula SLA/due_at a partir da severidade.
-    - Salva o incidente com status OPEN e marca o usuário logado como criador.
-    - Extrai URLs de snapshot/face do payload (via extract_media_from_event),
-      baixa os arquivos (save_incident_image_from_url) e cria mensagens de mídia
-      na timeline do incidente.
+    - Cria o incidente já com status OPEN
+    - Gera uma mensagem SYSTEM com o contexto do evento
+    - Tenta baixar snapshot / face cadastrada como mensagens MEDIA
     """
-    # 1) Carrega o evento e o dispositivo
     db_event = await crud_device_event.get(db, id=body.device_event_id)
     if not db_event:
         raise HTTPException(status_code=404, detail="DeviceEvent not found")
@@ -310,7 +311,6 @@ async def create_incident_from_event(
     if not db_device:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    # 2) Severidade / título / descrição
     severity = (body.severity or "MEDIUM").upper()
 
     default_title = f"Incidente de câmera (evento {db_event.analytic_type})"
@@ -322,16 +322,13 @@ async def create_incident_from_event(
     )
     description = body.description or default_description
 
-    # 3) Tenant (se existir no payload ou no body)
     tenant = body.tenant
     payload = db_event.payload or {}
     if tenant is None and isinstance(payload, dict):
         tenant = payload.get("tenant")
 
-    # 4) Tipo de incidente (kind) derivado do evento
     kind = infer_incident_kind_from_event(db_event)
 
-    # 5) SLA / due_at
     now = datetime.now(timezone.utc)
     sla_minutes, due_at = compute_sla_fields(
         severity=severity,
@@ -339,8 +336,10 @@ async def create_incident_from_event(
         now=now,
     )
 
-    # 6) Monta o dicionário para criar o incidente
-    incident_data = {
+    # ------------------------------------------------------------------
+    # Cria o incidente
+    # ------------------------------------------------------------------
+    data = {
         "device_id": db_event.device_id,
         "device_event_id": db_event.id,
         "kind": kind,
@@ -351,24 +350,94 @@ async def create_incident_from_event(
         "description": description,
         "sla_minutes": sla_minutes,
         "due_at": due_at,
-        # 👇 operador que criou o incidente
         "created_by_user_id": current_user.id,
     }
 
-    # 7) Cria o incidente
-    db_inc = await crud_incident.create(db, obj_in=incident_data)
+    db_inc = await crud_incident.create(db, obj_in=data)
 
-    # 8) Extrai descritores de mídia (snapshot, face cadastrada etc.) do evento
-    #    Aqui assumimos que extract_media_from_event retorna uma LISTA de dicts:
-    #    [
-    #       {
-    #          "source_url": "http://...",
-    #          "label": "Texto para a mensagem",
-    #          "filename_hint": "snapshot.jpg"  # opcional
-    #       },
-    #       ...
-    #    ]
-    media_descriptors = extract_media_from_event(db_event) or []
+    # ------------------------------------------------------------------
+    # 1) Mensagem SYSTEM de contexto (primeira da timeline)
+    # ------------------------------------------------------------------
+    analytic_raw = payload.get("AnalyticType") or db_event.analytic_type or ""
+    analytic = str(analytic_raw)
+
+    camera_name = (
+        payload.get("CameraName")
+        or getattr(db_device, "name", None)
+        or f"Câmera {db_device.id}"
+    )
+
+    ts_raw = (
+        payload.get("Timestamp")
+        or payload.get("timestamp")
+        or db_event.occurred_at
+        or db_event.created_at
+    )
+    ts_str = None
+    if isinstance(ts_raw, str):
+        # Se for string, mostramos direto (para não correr risco de parse dar erro)
+        ts_str = ts_raw
+    elif isinstance(ts_raw, datetime):
+        ts_str = ts_raw.isoformat()
+
+    building = payload.get("Building")
+    floor = payload.get("Floor")
+    meta = payload.get("Meta") or {}
+
+    # Dados de face reconhecida (se houver)
+    ff_name = meta.get("ff_person_name") or meta.get("person_name")
+    ff_confidence = meta.get("ff_confidence")
+
+    lines: list[str] = []
+    lines.append(
+        f"Incidente criado automaticamente a partir do evento **{analytic}** "
+        f"na câmera **{camera_name}**."
+    )
+
+    if ts_str:
+        lines.append(f"Horário do evento: {ts_str}.")
+
+    if building or floor:
+        partes = []
+        if building:
+            partes.append(f"Prédio: {building}")
+        if floor:
+            partes.append(f"Andar/Setor: {floor}")
+        lines.append("Local: " + " • ".join(partes) + ".")
+
+    if ff_name:
+        lines.append(f"Pessoa reconhecida: **{ff_name}**.")
+        if isinstance(ff_confidence, (int, float)):
+            lines.append(f"Confiança do match: {(ff_confidence * 100):.1f}%.")
+
+    # Severidade / fluxo
+    lines.append(f"Severidade: **{severity}**. Status inicial: **OPEN**.")
+    lines.append(
+        "Este incidente foi aberto manualmente a partir da tela de eventos "
+        "de câmera pelo operador "
+        f"**{current_user.full_name or current_user.email}**."
+    )
+
+    system_content = "\n".join(lines)
+
+    system_msg_data = {
+        "incident_id": db_inc.id,
+        "message_type": "SYSTEM",
+        "content": system_content,
+        "author_name": "Sistema",
+    }
+    await crud_incident_message.create(db, obj_in=system_msg_data)
+
+    # ------------------------------------------------------------------
+    # 2) Mídias derivadas do evento (snapshot, face cadastrada, etc.)
+    # ------------------------------------------------------------------
+    media_descriptors = extract_media_from_event(db_event)
+    # Esperado: lista de dicts tipo:
+    # {
+    #   "source_url": "...",
+    #   "filename_hint": "...",
+    #   "label": "Snapshot do evento ...",
+    # }
 
     for media in media_descriptors:
         url = media.get("source_url")
@@ -376,22 +445,19 @@ async def create_incident_from_event(
             continue
 
         try:
-            # 9) Baixa a imagem para o storage do incidente
             media_url, media_type, original_name = await save_incident_image_from_url(
                 incident_id=db_inc.id,
                 url=url,
                 filename_hint=media.get("filename_hint"),
             )
         except Exception as exc:
-            # Não quebra a criação do incidente se falhar o download;
-            # apenas loga e segue para a próxima mídia.
+            # Apenas loga e segue. Não queremos quebrar a criação do incidente.
             print(
                 f"[incidents] Falha ao baixar mídia '{url}' "
                 f"para incidente {db_inc.id}: {exc}"
             )
             continue
 
-        # 10) Cria mensagem de mídia na timeline
         msg_data = {
             "incident_id": db_inc.id,
             "message_type": "MEDIA",
@@ -399,21 +465,13 @@ async def create_incident_from_event(
             "media_url": media_url,
             "media_thumb_url": None,
             "media_name": original_name,
-            # Texto descritivo (ex.: "Pessoa reconhecida Fulano (97.5%)"
-            "content": media.get("label") or "",
-            # Autor "Sistema", já que é gerado automaticamente
+            "content": media.get("label"),
             "author_name": "Sistema",
         }
 
         await crud_incident_message.create(db, obj_in=msg_data)
 
     return db_inc
-
-
-# ---------------------------------------------------------------------------
-# ATTACHMENTS (upload de arquivo na timeline)
-# ---------------------------------------------------------------------------
-
 
 @router.post(
     "/{incident_id}/attachments",
@@ -429,28 +487,34 @@ async def upload_incident_attachment(
 ):
     """
     Faz upload de um arquivo e cria uma mensagem de mídia na timeline do incidente.
+
+    - Aceita qualquer tipo de arquivo (imagem, vídeo, áudio, documento, etc.).
+    - Salva em disco via save_incident_file.
+    - Cria uma IncidentMessage do tipo MEDIA ligada ao incidente.
     """
+    # Garante que o incidente existe
     db_inc = await crud_incident.get(db, id=incident_id)
     if not db_inc:
         raise HTTPException(status_code=404, detail="Incident not found")
 
+    # Salva o arquivo no storage (media/incidents/{incident_id}/...)
     media_url, media_type, original_name = await save_incident_file(
         incident_id=incident_id,
         file=file,
     )
 
+    # Usa a descrição, se o operador escreveu algo, senão um texto padrão
     content = description or f"Arquivo anexado: {original_name}"
 
     msg_data = {
         "incident_id": incident_id,
         "message_type": "MEDIA",
         "content": content,
-        "media_type": media_type,
-        "media_url": media_url,
+        "media_type": media_type,           # IMAGE / VIDEO / AUDIO / FILE
+        "media_url": media_url,             # URL pública gerada por save_incident_file
         "media_thumb_url": None,
         "media_name": original_name,
-        # ✅ apenas o nome do autor, sem user_id
-        "author_name": current_user.full_name,
+        "author_name": current_user.full_name,  # Nome do operador que anexou
     }
 
     db_msg = await crud_incident_message.create(db, obj_in=msg_data)
