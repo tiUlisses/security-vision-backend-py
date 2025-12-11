@@ -4,7 +4,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
-
+from app.services.incident_auto_rules import auto_create_incidents_for_event
 from app.api.deps import get_db_session
 from app.core.config import settings
 from app.crud import device as crud_device
@@ -17,6 +17,8 @@ from app.schemas import (
     DeviceCreate,
     DeviceUpdate,
     DeviceEventRead,
+    DeviceEventCreate,
+
 )
 from app.services.webhook_dispatcher import dispatch_generic_webhook
 from app.services.cambus_publisher import (
@@ -127,7 +129,31 @@ async def create_camera(
     return device
 
 
+@router.post(
+    "/{camera_id}/events",
+    response_model=DeviceEventRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_device_event_for_camera(
+    camera_id: int,
+    event_in: DeviceEventCreate,
+    db: AsyncSession = Depends(get_db_session),
+):
+    # 1) garante que o device existe e é CAMERA
+    db_obj = await crud_device.get(db, id=camera_id)
+    if not db_obj or db_obj.type != "CAMERA":
+        raise HTTPException(status_code=404, detail="Camera not found")
 
+    # 2) cria o DeviceEvent
+    data = event_in.dict(exclude_unset=True)
+    data["device_id"] = camera_id
+
+    db_event = await crud_device_event.create(db, obj_in=data)
+
+    # 3) aplica regras de incidentes automáticos
+    await auto_create_incidents_for_event(db, db_event)
+
+    return db_event
 
 
 @router.get("/{camera_id}/events", response_model=List[DeviceEventRead])

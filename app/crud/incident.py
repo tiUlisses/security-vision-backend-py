@@ -34,6 +34,16 @@ class CRUDIncident(CRUDBase[Incident, IncidentCreate, IncidentUpdate]):
         result = await db.execute(stmt)
         return result.scalars().all()
 
+    async def get_by_device_event(
+        self,
+        db: AsyncSession,
+        *,
+        device_event_id: int,
+    ) -> Incident | None:
+        stmt = select(Incident).where(Incident.device_event_id == device_event_id)
+        res = await db.execute(stmt)
+        return res.scalar_one_or_none()
+        
     async def list_open(
         self,
         db: AsyncSession,
