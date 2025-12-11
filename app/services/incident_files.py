@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
-
+from urllib.request import urlopen
 from fastapi import UploadFile
 
 from app.core.config import settings
