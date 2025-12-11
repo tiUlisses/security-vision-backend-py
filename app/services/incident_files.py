@@ -87,3 +87,46 @@ async def save_incident_file(
     media_type = guess_media_type_from_content_type(file.content_type)
 
     return media_url, media_type, original_name
+
+
+async def save_incident_image_from_url(
+    incident_id: int,
+    url: str,
+    filename_hint: str | None = None,
+) -> tuple[str, str, str]:
+    """
+    Faz download de uma imagem remota (SnapshotURL, foto de face, etc.)
+    e salva usando a mesma lógica de save_incident_file.
+
+    Retorna (media_url, media_type, original_name).
+    """
+    # Download síncrono simples – como é algo pontual por incidente,
+    # em geral é aceitável. Se depois quiser, trocamos para httpx/anyio.
+    resp = urlopen(url)
+    content = resp.read()
+    content_type = resp.info().get_content_type() or "image/jpeg"
+
+    ext = mimetypes.guess_extension(content_type) or ".jpg"
+
+    if filename_hint:
+        original_name = filename_hint
+    else:
+        parsed = urlparse(url)
+        original_name = parsed.path.rsplit("/", 1)[-1] or "image"
+
+    if "." not in original_name:
+        original_name = f"{original_name}{ext}"
+
+    upload = UploadFile(
+        filename=original_name,
+        file=BytesIO(content),
+        content_type=content_type,
+    )
+
+    # reaproveita toda a lógica já existente de path/URL em save_incident_file
+    media_url, media_type, saved_name = await save_incident_file(
+        incident_id=incident_id,
+        file=upload,
+    )
+
+    return media_url, media_type, saved_name
