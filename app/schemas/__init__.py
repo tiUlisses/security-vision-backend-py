@@ -60,7 +60,7 @@ from app.schemas.collection_log import (
 )
 
 from app.schemas.location import PersonCurrentLocation, DeviceCurrentOccupancy
-from app.schemas.device_event import DeviceEventRead
+from app.schemas.device_event import DeviceEventRead, DeviceEventCreate
 from app.schemas.alert_event import AlertEventCreate, AlertEventUpdate, AlertEventRead
 
 from .person_report import (
@@ -107,6 +107,14 @@ from .incident import (
     IncidentUpdate,
     IncidentRead,
     IncidentFromDeviceEventCreate,
+)
+
+from .incident_rule import (
+    IncidentRuleBase,
+    IncidentRuleCreate,
+    IncidentRuleUpdate,
+    IncidentRuleRead,
+
 )
 
 __all__ = [
@@ -190,6 +198,15 @@ __all__ = [
     "IncidentMessageBase",
     "IncidentMessageCreate",
     "IncidentMessageRead",
+    "IncidentRuleBase",
+    "IncidentRuleCreate",
+    "IncidentRuleUpdate",
+    "IncidentRuleRead",
+    "DeviceEventCreate",
+    "DeviceEventRead",
+
+    
+    
     
 
 ]
