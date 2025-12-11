@@ -17,6 +17,7 @@ from app.api.routes import (
     reports,
     incidents,
     auth,
+    incident_rules,
 )
 
 # 👉 novo import, vindo do pacote app.api.routes.devices
@@ -28,6 +29,11 @@ api_router.include_router(
     buildings.router,
     prefix="/buildings",
     tags=["buildings"],
+)
+api_router.include_router(
+    incident_rules.router,
+    prefix="/incident-rules",
+    tags=["incident_rules"],
 )
 api_router.include_router(
     floors.router,
