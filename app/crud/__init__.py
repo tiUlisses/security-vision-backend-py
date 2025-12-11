@@ -15,6 +15,7 @@ from app.crud.device_event import device_event
 from .incident import CRUDIncident, incident
 from .incident_message import CRUDIncidentMessage, incident_message
 from app.crud.user import user
+from app.crud.incident_rule import incident_rule
 
 __all__ = [
     "building",
@@ -35,4 +36,5 @@ __all__ = [
     "CRUDIncidentMessage",
     "incident_message",
     "user",
+    "incident_rule",
 ]
