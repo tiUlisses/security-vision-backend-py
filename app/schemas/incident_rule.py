@@ -2,61 +2,50 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict
 
 
 class IncidentRuleBase(BaseModel):
-    name: str = Field(
-        ...,
-        description="Nome da regra (ex.: 'FaceRecognized - Entrada')",
-    )
-    analytic_type: str = Field(
-        ...,
-        description="Analítico observado pela regra (ex.: 'faceRecognized')",
-    )
-    device_id: Optional[int] = Field(
-        None,
-        description="Se informado, a regra só se aplica a esta câmera",
-    )
-    severity: Optional[str] = Field(
-        "MEDIUM",
-        description="Severidade padrão (LOW / MEDIUM / HIGH / CRITICAL)",
-    )
-    title_template: Optional[str] = Field(
-        None,
-        description=(
-            "Template para título do incidente. "
-            "Placeholders: {analytic_type}, {camera_name}, "
-            "{device_id}, {device_code}, {building}, {floor}"
-        ),
-    )
-    description_template: Optional[str] = Field(
-        None,
-        description="Template para descrição do incidente.",
-    )
-    assigned_to_user_id: Optional[int] = Field(
-        None,
-        description="Usuário para o qual o incidente será atribuído automaticamente",
-    )
-    is_enabled: bool = Field(
-        True,
-        description="Se falso, a regra é ignorada.",
-    )
+    name: str
+    enabled: bool = True
+
+    analytic_type: Optional[str] = None
+    device_id: Optional[int] = None
+    tenant: Optional[str] = None
+
+    severity: str = "MEDIUM"  # LOW / MEDIUM / HIGH / CRITICAL
+
+    title_template: Optional[str] = None
+    description_template: Optional[str] = None
+
+    assigned_to_user_id: Optional[int] = None
 
 
 class IncidentRuleCreate(IncidentRuleBase):
+    """
+    Por enquanto não exigimos nenhum campo extra além do base.
+    """
     pass
 
 
 class IncidentRuleUpdate(BaseModel):
+    """
+    Atualização parcial (PATCH).
+    Todos os campos opcionais.
+    """
     name: Optional[str] = None
+    enabled: Optional[bool] = None
+
     analytic_type: Optional[str] = None
-    device_id: Optional[int | None] = None
+    device_id: Optional[int] = None
+    tenant: Optional[str] = None
+
     severity: Optional[str] = None
-    title_template: Optional[str | None] = None
-    description_template: Optional[str | None] = None
-    assigned_to_user_id: Optional[int | None] = None
-    is_enabled: Optional[bool] = None
+
+    title_template: Optional[str] = None
+    description_template: Optional[str] = None
+
+    assigned_to_user_id: Optional[int] = None
 
 
 class IncidentRuleRead(IncidentRuleBase):
@@ -64,5 +53,4 @@ class IncidentRuleRead(IncidentRuleBase):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
