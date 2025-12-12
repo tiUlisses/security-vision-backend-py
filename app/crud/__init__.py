@@ -16,6 +16,7 @@ from .incident import CRUDIncident, incident
 from .incident_message import CRUDIncidentMessage, incident_message
 from app.crud.user import user
 from app.crud.incident_rule import incident_rule
+from app.crud.support_group import support_group
 
 __all__ = [
     "building",

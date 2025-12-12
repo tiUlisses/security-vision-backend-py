@@ -2,7 +2,7 @@
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, AnyHttpUrl
 
 
 class Settings(BaseSettings):
@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     - settings.MQTT_ENABLED / MQTT_HOST / MQTT_PORT / MQTT_TOPIC / MQTT_GATEWAY_TOPIC_PREFIX
     - settings.CAMBUS_MQTT_* para o cam-bus
     """
+    FRONTEND_BASE_URL: Optional[AnyHttpUrl] = None
+    CHATWOOT_ENABLED: bool = False
+    CHATWOOT_BASE_URL: AnyHttpUrl | None = None
+    CHATWOOT_API_ACCESS_TOKEN: str | None = None
+    CHATWOOT_DEFAULT_ACCOUNT_ID: str | None = None
+    CHATWOOT_DEFAULT_INBOX_IDENTIFIER: str | None = None
+    CHATWOOT_DEFAULT_CONTACT_IDENTIFIER: str = "security-vision-system"
 
     # Config Pydantic v2
     model_config = SettingsConfigDict(
