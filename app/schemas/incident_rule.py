@@ -14,7 +14,7 @@ class IncidentRuleBase(BaseModel):
     tenant: Optional[str] = None
 
     severity: str = "MEDIUM"  # LOW / MEDIUM / HIGH / CRITICAL
-
+    camera_group_id: Optional[int] = None
     title_template: Optional[str] = None
     description_template: Optional[str] = None
 

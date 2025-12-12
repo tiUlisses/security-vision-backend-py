@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, TYPE_CHECKING
-
+from app.services.chatwoot_client import ChatwootClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import (

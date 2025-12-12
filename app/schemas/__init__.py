@@ -121,6 +121,23 @@ from .camera_group import (
     CameraGroupRead,
     CameraGroupUpdate,
 )
+from .incident_message import (
+    IncidentMessageBase,
+    IncidentMessageCreate,
+    IncidentMessageRead,
+)
+
+from .support_group import (
+    SupportGroupBase,
+    SupportGroupCreate,
+    SupportGroupUpdate,
+    SupportGroupRead,
+)
+
+from .incident_rule import (
+    IncidentRuleBase,
+)
+
 
 __all__ = [
     "BuildingBase",
@@ -212,6 +229,14 @@ __all__ = [
     "CameraGroupCreate",
     "CameraGroupRead",
     "CameraGroupUpdate",
+    "SupportGroupBase",
+    "SupportGroupCreate",
+    "SupportGroupUpdate",
+    "SupportGroupRead",
+    "IncidentRuleBase",
+    "IncidentRuleCreate",
+    "IncidentRuleUpdate",
+    "IncidentRuleRead",
     
 
 ]
