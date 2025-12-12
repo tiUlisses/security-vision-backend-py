@@ -132,6 +132,7 @@ from .support_group import (
     SupportGroupCreate,
     SupportGroupUpdate,
     SupportGroupRead,
+    SupportGroupShort,
 )
 
 from .incident_rule import (

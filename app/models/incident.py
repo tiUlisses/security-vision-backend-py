@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from app.models.device_event import DeviceEvent
     from app.models.incident_message import IncidentMessage
     from app.models.user import User
-
+    from app.models.support_group import SupportGroup
 
 class Incident(Base):
     __tablename__ = "incidents"

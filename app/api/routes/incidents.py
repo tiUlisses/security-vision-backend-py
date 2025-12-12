@@ -56,6 +56,26 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
+@router.get("/my", response_model=List[IncidentRead])
+async def list_my_incidents(
+    skip: int = 0,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Lista apenas incidentes relacionados ao usuário:
+    - assigned_to_user_id == current_user.id
+    - OU current_user em assignees
+    - OU incidentes atribuídos a grupos dos quais current_user é membro.
+    """
+    return await crud_incident.list_for_user(
+        db,
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit,
+    )
+
 @router.get("/", response_model=List[IncidentRead])
 async def list_incidents(
     skip: int = 0,
@@ -131,15 +151,19 @@ async def create_incident(
     )
 
     data = incident_in.model_dump()
+
+    # ❌ NÃO é coluna do model Incident (é conceito de relacionamento N:N)
+    data.pop("assignee_ids", None)
+
+    # Incidente manual não deve ser vinculado direto a um DeviceEvent
+    data["device_event_id"] = None
+
     data["sla_minutes"] = sla_minutes
     data["due_at"] = due_at
     data["created_by_user_id"] = current_user.id
-    # ❌ NÃO usar updated_by_user_id, pois não existe no modelo
-    # data["updated_by_user_id"] = current_user.id
 
     db_inc = await crud_incident.create(db, obj_in=data)
     return db_inc
-
 
 # ---------------------------------------------------------------------------
 # CREATE a partir de um DeviceEvent específico (por ex. na tela da câmera)

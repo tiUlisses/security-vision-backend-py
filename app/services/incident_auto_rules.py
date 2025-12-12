@@ -11,6 +11,7 @@ from app.crud import (
     incident as crud_incident,
     incident_message as crud_incident_message,
     incident_rule as crud_incident_rule,
+    support_group as crud_support_group,
 )
 from app.services.incident_files import save_incident_image_from_url
 from app.services.incidents import (
@@ -66,22 +67,44 @@ async def apply_incident_rules_for_event(
     incidents: List["Incident"] = []
 
     for rule in rules:
-        print(f"[incident_rules] Aplicando regra id={rule.id}, name='{rule.name}' ao evento {event.id}")
-
-        severity = (rule.severity or "MEDIUM").upper()
-
-        now = datetime.now(timezone.utc)
-        sla_minutes, due_at = compute_sla_fields(
-            severity=severity,
-            sla_minutes=None,
-            now=now,
+        print(
+            f"[incident_rules] Aplicando regra id={rule.id}, "
+            f"name='{rule.name}' ao evento {event.id}"
         )
 
+        # 🔹 Pega o group_id de forma segura (não quebra se o atributo não existir)
+        group_id = getattr(rule, "assigned_group_id", None)
+        print(f"[incident_rules] rule.id={rule.id} assigned_group_id={group_id}")
+
+        severity = (rule.severity or "MEDIUM").upper()
         kind = infer_incident_kind_from_event(event)
+
+        # ----------------------------
+        # SLA: se a regra tiver grupo, tenta usar o default_sla_minutes do grupo
+        # ----------------------------
+        now = datetime.now(timezone.utc)
+        group_default_sla: int | None = None
+
+        if group_id:
+            sg = await crud_support_group.get(db, id=group_id)
+            if sg:
+                print(
+                    f"[incident_rules] Suporte group id={group_id} "
+                    f"default_sla_minutes={sg.default_sla_minutes}"
+                )
+                if sg.default_sla_minutes:
+                    group_default_sla = sg.default_sla_minutes
+
+        sla_minutes, due_at = compute_sla_fields(
+            severity=severity,
+            sla_minutes=group_default_sla,  # se None, cai no default global por severidade
+            now=now,
+        )
 
         camera_name = getattr(device, "name", None) or f"CAM {device.id}"
 
         # ---------- título / descrição com templates ----------
+
         ctx: Dict[str, Any] = {
             "analytic_type": event.analytic_type,
             "camera_name": camera_name,
@@ -119,8 +142,13 @@ async def apply_incident_rules_for_event(
             "description": description,
             "sla_minutes": sla_minutes,
             "due_at": due_at,
+            # atribuição automática
             "assigned_to_user_id": rule.assigned_to_user_id,
         }
+
+        # Só adiciona se realmente tiver grupo
+        if group_id:
+            data["assigned_group_id"] = group_id
 
         # remove chaves com None
         data = {k: v for k, v in data.items() if v is not None}
@@ -175,7 +203,12 @@ async def apply_incident_rules_for_event(
 
         lines.append(f"Severidade: **{severity}**. Status inicial: **OPEN**.")
 
-        if rule.assigned_to_user_id:
+        if group_id:
+            lines.append(
+                "Incidente atribuído automaticamente ao grupo de atendimento "
+                "configurado na regra."
+            )
+        elif rule.assigned_to_user_id:
             lines.append(
                 "Incidente atribuído automaticamente ao operador configurado na regra."
             )

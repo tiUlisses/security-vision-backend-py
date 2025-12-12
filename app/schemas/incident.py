@@ -4,7 +4,7 @@ from typing import Optional, List
 
 from pydantic import BaseModel, Field
 from app.schemas.user import UserShort  # ou o nome que você tiver
-from app.schemas.support_group import SupportGroupRead  # vamos criar já já
+from app.schemas.support_group import SupportGroupShort  # vamos criar já já
 
 class IncidentBase(BaseModel):
     device_id: int
@@ -56,9 +56,10 @@ class IncidentRead(IncidentBase):
     created_at: datetime
     updated_at: datetime
     closed_at: Optional[datetime] = None
-    assigned_group: Optional[SupportGroupRead] = None
+
+    assigned_group: Optional[SupportGroupShort] = None
     assignees: List[UserShort] = []
-    chatwoot_conversation_id: Optional[int] = None   # 🔹 novo
+    chatwoot_conversation_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -69,7 +70,7 @@ class IncidentFromDeviceEventCreate(BaseModel):
     title: Optional[str] = Field(None, max_length=255)
     description: Optional[str] = None
     severity: Optional[str] = Field(None, max_length=32)
-
+    assigned_group_id: Optional[int] = None
     # 🔹 opcionalmente permitir override de SLA/tenant na criação por evento
     sla_minutes: Optional[int] = None
     tenant: Optional[str] = Field(None, max_length=64)

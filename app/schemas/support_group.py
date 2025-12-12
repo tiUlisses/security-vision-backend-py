@@ -19,6 +19,13 @@ class SupportGroupCreate(SupportGroupBase):
     member_ids: List[int] = []
 
 
+class SupportGroupShort(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
 class SupportGroupUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
