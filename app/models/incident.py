@@ -4,9 +4,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional, List
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, text, Integer
+from sqlalchemy import DateTime, ForeignKey, String, Text, text, Integer, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
+from app.models.support_group import SupportGroup
+from app.models.incident_assignee import incident_assignees
 from app.db.base_class import Base
 
 if TYPE_CHECKING:
@@ -79,6 +80,11 @@ class Incident(Base):
         nullable=True,
         index=True,
     )
+    chatwoot_conversation_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -142,12 +148,6 @@ class Incident(Base):
         foreign_keys="Incident.assigned_to_user_id",
     )
 
-    messages: Mapped[List["IncidentMessage"]] = relationship(
-        "IncidentMessage",
-        back_populates="incident",
-        cascade="all, delete-orphan",
-    )
-
     attachments: Mapped[List["IncidentAttachment"]] = relationship(
         "IncidentAttachment",
         back_populates="incident",
@@ -156,3 +156,21 @@ class Incident(Base):
 
     device: Mapped["Device"] = relationship("Device")
     device_event: Mapped["DeviceEvent"] | None = relationship("DeviceEvent")
+
+    assigned_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("support_groups.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    assigned_group: Mapped["SupportGroup"] = relationship(
+        "SupportGroup",
+        back_populates="incidents",
+    )
+
+    # 🔹 NOVO: lista de pessoas atuando no incidente
+    assignees: Mapped[List["User"]] = relationship(
+        "User",
+        secondary=incident_assignees,
+        back_populates="assigned_incidents",
+    )
