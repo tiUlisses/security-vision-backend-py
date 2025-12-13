@@ -14,7 +14,7 @@ from app.api.routes import positions
 from app.api.routes import reports
 from app.api.routes import auth
 from app.api.routes import incidents
-from app.api.routes import integrations_chatwoot
+from app.api.routes import chatwoot_webhooks as integrations_chatwoot
 from app.api.routes import support_groups
 __all__ = [
     "buildings",

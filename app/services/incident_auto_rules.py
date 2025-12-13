@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, TYPE_CHECKING
 from app.services.chatwoot_client import ChatwootClient
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.config import settings
 
 from app.crud import (
     device as crud_device,
@@ -24,6 +25,9 @@ if TYPE_CHECKING:
     from app.models.device_event import DeviceEvent
     from app.models.incident import Incident
 
+
+
+chatwoot_client = ChatwootClient()
 
 async def apply_incident_rules_for_event(
     db: AsyncSession,
@@ -155,6 +159,18 @@ async def apply_incident_rules_for_event(
 
         incident = await crud_incident.create(db, obj_in=data)
         incidents.append(incident)
+            # 🔹 Dispara notificação inicial / criação da conversa no Chatwoot
+        try:
+            cw = ChatwootClient()
+            await cw.send_incident_notification(
+                incident=incident,
+                incident_url=f"incident:{incident.id}",
+            )
+        except Exception as exc:
+            print(
+                f"[chatwoot] erro ao enviar notificação para incidente "
+                f"{incident.id}: {exc}"
+            )
 
         # ------------------------
         # Mensagem SYSTEM de contexto

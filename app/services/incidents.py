@@ -1,6 +1,7 @@
 # app/services/incidents.py
 from __future__ import annotations
-
+import logging
+from app.services.chatwoot_client import ChatwootClient
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,9 @@ from app.crud import (
 
 TERMINAL_STATUSES = {"RESOLVED", "FALSE_POSITIVE", "CANCELED"}
 ACTIVE_STATUSES = {"OPEN", "IN_PROGRESS"}
+
+logger = logging.getLogger(__name__)
+
 
 # 🔹 SLA padrão por severidade (em minutos)
 DEFAULT_SLA_BY_SEVERITY: dict[str, int] = {
@@ -126,7 +130,6 @@ async def apply_incident_update(
         obj_in=update_data,
     )
 
-    # Se houve mudança de status, registramos mensagem de sistema
     if new_status != old_status:
         content = f"Status alterado de {old_status} para {new_status}."
         msg_data = {
@@ -134,7 +137,20 @@ async def apply_incident_update(
             "message_type": "SYSTEM",
             "content": content,
         }
-        await crud_incident_message.create(db, obj_in=msg_data)
+        db_msg = await crud_incident_message.create(db, obj_in=msg_data)
+
+        # 🔹 envia também pro Chatwoot
+        try:
+            client = ChatwootClient()
+            await client.send_incident_timeline_message(
+                updated,
+                db_msg,
+            )
+        except Exception:
+            logger.exception(
+                "[chatwoot] erro ao enviar mensagem de status do incidente %s",
+                updated.id,
+            )
 
     return updated
 

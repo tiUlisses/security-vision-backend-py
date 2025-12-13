@@ -2,10 +2,12 @@
 from typing import List, Optional
 from datetime import datetime, timezone
 import asyncio
+import logging
 import mimetypes
 import uuid
 from tempfile import SpooledTemporaryFile
 from urllib.request import urlopen
+from app.services.chatwoot_client import ChatwootClient
 
 from fastapi import (
     APIRouter,
@@ -47,7 +49,8 @@ from app.schemas import (
     IncidentMessageRead,
 )
 
-
+logger = logging.getLogger(__name__)
+chatwoot_client = ChatwootClient()
 router = APIRouter()
 
 
@@ -60,18 +63,21 @@ router = APIRouter()
 async def list_my_incidents(
     skip: int = 0,
     limit: int = 100,
+    only_open: bool = False,
     db: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Lista apenas incidentes relacionados ao usuário:
-    - assigned_to_user_id == current_user.id
-    - OU current_user em assignees
-    - OU incidentes atribuídos a grupos dos quais current_user é membro.
+    Lista apenas incidentes visíveis para o operador logado:
+    - atribuídos diretamente a ele
+    - em que ele é assignee
+    - atribuídos a grupos dos quais ele é membro
+    - gerais (sem grupo e sem responsável)
     """
     return await crud_incident.list_for_user(
         db,
         user_id=current_user.id,
+        only_open=only_open,
         skip=skip,
         limit=limit,
     )
@@ -163,6 +169,26 @@ async def create_incident(
     data["created_by_user_id"] = current_user.id
 
     db_inc = await crud_incident.create(db, obj_in=data)
+     # -------------------------------------
+    # Chatwoot: melhor esforço
+    # -------------------------------------
+    if chatwoot_client.is_configured():
+        try:
+            conv_id = await chatwoot_client.send_incident_notification(db_inc)
+            if conv_id and conv_id != db_inc.chatwoot_conversation_id:
+                # persiste o conversation_id no incidente
+                db_inc = await crud_incident.update(
+                    db,
+                    db_obj=db_inc,
+                    obj_in={"chatwoot_conversation_id": conv_id},
+                )
+        except Exception:
+            logger.exception(
+                "[chatwoot] falha ao enviar notificação do incidente %s",
+                db_inc.id,
+            )
+
+
     return db_inc
 
 # ---------------------------------------------------------------------------
@@ -302,6 +328,20 @@ async def create_incident_message(
     msg_data["author_name"] = current_user.full_name
 
     db_msg = await crud_incident_message.create(db, obj_in=msg_data)
+
+    # 🔹 envia também pro Chatwoot (best effort, sem quebrar a API)
+    try:
+        await chatwoot_client.send_incident_timeline_message(
+            db_inc,
+            db_msg,
+        )
+    except Exception:
+        logger.exception(
+            "[chatwoot] erro ao enviar comentário %s do incidente %s para o Chatwoot",
+            db_msg.id,
+            db_inc.id,
+        )
+
     return db_msg
 
 
@@ -494,6 +534,23 @@ async def create_incident_from_event(
         }
 
         await crud_incident_message.create(db, obj_in=msg_data)
+    
+        # Ao final (antes do return db_inc):
+    if chatwoot_client.is_configured():
+        try:
+            conv_id = await chatwoot_client.send_incident_notification(db_inc)
+            if conv_id and conv_id != db_inc.chatwoot_conversation_id:
+                db_inc = await crud_incident.update(
+                    db,
+                    db_obj=db_inc,
+                    obj_in={"chatwoot_conversation_id": conv_id},
+                )
+        except Exception:
+            logger.exception(
+                "[chatwoot] erro ao enviar notificação Chatwoot para incidente %s",
+                db_inc.id,
+            )
+
 
     return db_inc
 
@@ -542,4 +599,16 @@ async def upload_incident_attachment(
     }
 
     db_msg = await crud_incident_message.create(db, obj_in=msg_data)
+        # 🔹 envia também pro Chatwoot (best effort)
+    try:
+        await chatwoot_client.send_incident_timeline_message(
+            db_inc,
+            db_msg,
+        )
+    except Exception:
+        logger.exception(
+            "[chatwoot] erro ao enviar anexo %s do incidente %s para o Chatwoot",
+            db_msg.id,
+            db_inc.id,
+        )
     return db_msg

@@ -18,8 +18,8 @@ from app.api.routes import (
     incidents,
     auth,
     incident_rules,
-    integrations_chatwoot,
     support_groups,
+    chatwoot_webhooks,
 )
 
 # 👉 novo import, vindo do pacote app.api.routes.devices
@@ -113,10 +113,15 @@ api_router.include_router(
     prefix="/reports",
     tags=["reports"],
 )
-
-api_router.include_router(integrations_chatwoot.router)
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(
     support_groups.router,
     tags=["support-groups"],
+)
+
+# 👇 AQUI: prefix bate com o que o Chatwoot está chamando
+api_router.include_router(
+    chatwoot_webhooks.router,
+    prefix="/integrations/chatwoot",
+    tags=["chatwoot"],
 )

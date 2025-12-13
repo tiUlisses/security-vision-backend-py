@@ -1,6 +1,7 @@
 # app/core/config.py
 from typing import Optional
-
+import os
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AnyHttpUrl
 
@@ -28,6 +29,10 @@ class Settings(BaseSettings):
     CHATWOOT_DEFAULT_ACCOUNT_ID: str | None = None
     CHATWOOT_DEFAULT_INBOX_IDENTIFIER: str | None = None
     CHATWOOT_DEFAULT_CONTACT_IDENTIFIER: str = "security-vision-system"
+    CHATWOOT_WEBHOOK_TOKEN: str | None = os.getenv("CHATWOOT_WEBHOOK_TOKEN")
+    CHATWOOT_INCIDENT_BASE_URL: AnyHttpUrl | None = None
+
+    # ==================================================================
 
     # Config Pydantic v2
     model_config = SettingsConfigDict(
@@ -36,7 +41,7 @@ class Settings(BaseSettings):
         extra="ignore",  # ignora qualquer variável extra que não tenhamos declarado
     )
 
-    APP_NAME: str = "SecurityVision Position"
+    APP_NAME: str = "SecurityVision"
 
     # ------------------------------------------------------------------
     # Redis
