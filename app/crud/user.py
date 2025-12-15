@@ -1,7 +1,7 @@
 # app/crud/user.py
 from typing import Any, Dict, Optional, Union
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud.base import CRUDBase
@@ -19,6 +19,22 @@ class CRUDUser(CRUDBase[User, UserCreate, UserUpdate]):
         stmt = select(User).where(User.email == email)
         result = await db.execute(stmt)
         return result.scalars().first()
+
+    async def has_admin(
+        self,
+        db: AsyncSession,
+    ) -> bool:
+        """
+        Retorna True se existir ao menos 1 usuário com permissão de admin.
+        Considera tanto is_superuser quanto roles ADMIN/SUPERADMIN.
+        """
+        stmt = (
+            select(User.id)
+            .where(or_(User.is_superuser.is_(True), User.role.in_(("ADMIN", "SUPERADMIN"))))
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none() is not None
 
     async def create_with_hashed_password(
         self,

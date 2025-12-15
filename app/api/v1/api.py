@@ -20,6 +20,7 @@ from app.api.routes import (
     incident_rules,
     support_groups,
     chatwoot_webhooks,
+    users,
 )
 
 # 👉 novo import, vindo do pacote app.api.routes.devices
@@ -124,4 +125,8 @@ api_router.include_router(
     chatwoot_webhooks.router,
     prefix="/integrations/chatwoot",
     tags=["chatwoot"],
+)
+api_router.include_router(
+    users.router,
+    tags=["users"],
 )

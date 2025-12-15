@@ -1,6 +1,7 @@
 # app/api/routes/incidents.py
 from typing import List, Optional
 from datetime import datetime, timezone
+from sqlalchemy import select
 import asyncio
 import logging
 import mimetypes
@@ -8,6 +9,9 @@ import uuid
 from tempfile import SpooledTemporaryFile
 from urllib.request import urlopen
 from app.services.chatwoot_client import ChatwootClient
+from app.api.deps import get_current_user
+from app.db.session import get_db
+from app.models.incident_message import IncidentMessage
 
 from fastapi import (
     APIRouter,
@@ -17,6 +21,7 @@ from fastapi import (
     UploadFile,
     File,
     Form,
+    Query,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +44,7 @@ from app.crud import (
     device_event as crud_device_event,
     device as crud_device,
     incident_message as crud_incident_message,
+    support_group as crud_support_group,
 )
 from app.schemas import (
     IncidentCreate,
@@ -363,10 +369,16 @@ async def create_incident_from_event(
     """
     Cria incidente a partir de um DeviceEvent (campo device_event_id em body).
 
-    - Cria o incidente já com status OPEN
-    - Gera uma mensagem SYSTEM com o contexto do evento
-    - Tenta baixar snapshot / face cadastrada como mensagens MEDIA
+    - Cria o incidente OPEN
+    - Gera uma mensagem SYSTEM com contexto do evento
+    - Tenta baixar snapshot/face/etc como mensagens MEDIA
+    - Best-effort: notifica Chatwoot (e pode enviar anexos via timeline)
     """
+    db_inc = None
+
+    # ------------------------------------------------------------------
+    # 0) Validações básicas
+    # ------------------------------------------------------------------
     db_event = await crud_device_event.get(db, id=body.device_event_id)
     if not db_event:
         raise HTTPException(status_code=404, detail="DeviceEvent not found")
@@ -377,32 +389,39 @@ async def create_incident_from_event(
 
     severity = (body.severity or "MEDIUM").upper()
 
+    payload = db_event.payload or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
     default_title = f"Incidente de câmera (evento {db_event.analytic_type})"
     title = body.title or default_title
 
     default_description = (
-        f"Incidente gerado automaticamente a partir do evento {db_event.id} "
+        f"Incidente gerado a partir do evento {db_event.id} "
         f"({db_event.analytic_type}) do dispositivo {db_device.name}."
     )
     description = body.description or default_description
 
     tenant = body.tenant
-    payload = db_event.payload or {}
-    if tenant is None and isinstance(payload, dict):
+    if tenant is None:
         tenant = payload.get("tenant")
 
     kind = infer_incident_kind_from_event(db_event)
 
+    # SLA: se vier no body, usa. Se não vier e tiver grupo, usa default do grupo.
+    sla_hint = body.sla_minutes
+    if sla_hint is None and body.assigned_group_id is not None:
+        grp = await crud_support_group.get(db, id=body.assigned_group_id)
+        if grp and getattr(grp, "default_sla_minutes", None):
+            sla_hint = grp.default_sla_minutes
+
     now = datetime.now(timezone.utc)
     sla_minutes, due_at = compute_sla_fields(
         severity=severity,
-        sla_minutes=body.sla_minutes,
+        sla_minutes=sla_hint,
         now=now,
     )
 
-    # ------------------------------------------------------------------
-    # Cria o incidente
-    # ------------------------------------------------------------------
     data = {
         "device_id": db_event.device_id,
         "device_event_id": db_event.id,
@@ -415,127 +434,135 @@ async def create_incident_from_event(
         "sla_minutes": sla_minutes,
         "due_at": due_at,
         "created_by_user_id": current_user.id,
+        "assigned_group_id": body.assigned_group_id,
     }
 
-    db_inc = await crud_incident.create(db, obj_in=data)
+    # ------------------------------------------------------------------
+    # 1) CRIA o incidente primeiro (isso estava faltando)
+    # ------------------------------------------------------------------
+    try:
+        db_inc = await crud_incident.create(db, obj_in=data)
+    except Exception:
+        logger.exception("[incidents] erro ao criar incidente from-event (device_event_id=%s)", db_event.id)
+        raise HTTPException(status_code=500, detail="Erro ao criar incidente a partir do evento.")
 
     # ------------------------------------------------------------------
-    # 1) Mensagem SYSTEM de contexto (primeira da timeline)
+    # 2) Mensagem SYSTEM de contexto
     # ------------------------------------------------------------------
-    analytic_raw = payload.get("AnalyticType") or db_event.analytic_type or ""
-    analytic = str(analytic_raw)
+    try:
+        analytic = str(payload.get("AnalyticType") or db_event.analytic_type or "")
+        camera_name = payload.get("CameraName") or getattr(db_device, "name", None) or f"Câmera {db_device.id}"
 
-    camera_name = (
-        payload.get("CameraName")
-        or getattr(db_device, "name", None)
-        or f"Câmera {db_device.id}"
-    )
+        ts_raw = payload.get("Timestamp") or payload.get("timestamp") or db_event.occurred_at or db_event.created_at
+        ts_str = None
+        if isinstance(ts_raw, str):
+            ts_str = ts_raw
+        elif isinstance(ts_raw, datetime):
+            ts_str = ts_raw.isoformat()
 
-    ts_raw = (
-        payload.get("Timestamp")
-        or payload.get("timestamp")
-        or db_event.occurred_at
-        or db_event.created_at
-    )
-    ts_str = None
-    if isinstance(ts_raw, str):
-        # Se for string, mostramos direto (para não correr risco de parse dar erro)
-        ts_str = ts_raw
-    elif isinstance(ts_raw, datetime):
-        ts_str = ts_raw.isoformat()
+        building = payload.get("Building")
+        floor = payload.get("Floor")
+        meta = payload.get("Meta") or {}
+        if not isinstance(meta, dict):
+            meta = {}
 
-    building = payload.get("Building")
-    floor = payload.get("Floor")
-    meta = payload.get("Meta") or {}
+        ff_name = meta.get("ff_person_name") or meta.get("person_name")
+        ff_confidence = meta.get("ff_confidence")
 
-    # Dados de face reconhecida (se houver)
-    ff_name = meta.get("ff_person_name") or meta.get("person_name")
-    ff_confidence = meta.get("ff_confidence")
+        lines: list[str] = []
+        lines.append(
+            f"Incidente criado a partir do evento **{analytic}** na câmera **{camera_name}**."
+        )
+        if ts_str:
+            lines.append(f"Horário do evento: {ts_str}.")
+        if building or floor:
+            partes = []
+            if building:
+                partes.append(f"Prédio: {building}")
+            if floor:
+                partes.append(f"Andar/Setor: {floor}")
+            lines.append("Local: " + " • ".join(partes) + ".")
+        if ff_name:
+            lines.append(f"Pessoa reconhecida: **{ff_name}**.")
+            if isinstance(ff_confidence, (int, float)):
+                lines.append(f"Confiança do match: {(ff_confidence * 100):.1f}%.")
+        lines.append(f"Severidade: **{severity}**. Status inicial: **OPEN**.")
+        lines.append(
+            "Este incidente foi aberto manualmente pelo operador "
+            f"**{current_user.full_name or current_user.email}**."
+        )
 
-    lines: list[str] = []
-    lines.append(
-        f"Incidente criado automaticamente a partir do evento **{analytic}** "
-        f"na câmera **{camera_name}**."
-    )
+        system_content = "\n".join(lines)
 
-    if ts_str:
-        lines.append(f"Horário do evento: {ts_str}.")
-
-    if building or floor:
-        partes = []
-        if building:
-            partes.append(f"Prédio: {building}")
-        if floor:
-            partes.append(f"Andar/Setor: {floor}")
-        lines.append("Local: " + " • ".join(partes) + ".")
-
-    if ff_name:
-        lines.append(f"Pessoa reconhecida: **{ff_name}**.")
-        if isinstance(ff_confidence, (int, float)):
-            lines.append(f"Confiança do match: {(ff_confidence * 100):.1f}%.")
-
-    # Severidade / fluxo
-    lines.append(f"Severidade: **{severity}**. Status inicial: **OPEN**.")
-    lines.append(
-        "Este incidente foi aberto manualmente a partir da tela de eventos "
-        "de câmera pelo operador "
-        f"**{current_user.full_name or current_user.email}**."
-    )
-
-    system_content = "\n".join(lines)
-
-    system_msg_data = {
-        "incident_id": db_inc.id,
-        "message_type": "SYSTEM",
-        "content": system_content,
-        "author_name": "Sistema",
-    }
-    await crud_incident_message.create(db, obj_in=system_msg_data)
+        await crud_incident_message.create(
+            db,
+            obj_in={
+                "incident_id": db_inc.id,
+                "message_type": "SYSTEM",
+                "content": system_content,
+                "author_name": "Sistema",
+            },
+        )
+    except Exception:
+        logger.exception("[incidents] falha ao criar SYSTEM message do incidente %s", db_inc.id)
 
     # ------------------------------------------------------------------
-    # 2) Mídias derivadas do evento (snapshot, face cadastrada, etc.)
+    # 3) Mídias derivadas do evento (snapshot, face cadastrada, etc.)
     # ------------------------------------------------------------------
-    media_descriptors = extract_media_from_event(db_event)
-    # Esperado: lista de dicts tipo:
-    # {
-    #   "source_url": "...",
-    #   "filename_hint": "...",
-    #   "label": "Snapshot do evento ...",
-    # }
+    media_descriptors = extract_media_from_event(db_event) or []
+    if not isinstance(media_descriptors, list):
+        media_descriptors = []
 
     for media in media_descriptors:
-        url = media.get("source_url")
-        if not url:
-            continue
-
         try:
+            if not isinstance(media, dict):
+                continue
+
+            url = media.get("source_url")
+            if not url:
+                continue
+
             media_url, media_type, original_name = await save_incident_image_from_url(
                 incident_id=db_inc.id,
                 url=url,
                 filename_hint=media.get("filename_hint"),
             )
-        except Exception as exc:
-            # Apenas loga e segue. Não queremos quebrar a criação do incidente.
-            print(
-                f"[incidents] Falha ao baixar mídia '{url}' "
-                f"para incidente {db_inc.id}: {exc}"
+
+            db_msg = await crud_incident_message.create(
+                db,
+                obj_in={
+                    "incident_id": db_inc.id,
+                    "message_type": "MEDIA",
+                    "media_type": media_type or "IMAGE",
+                    "media_url": media_url,
+                    "media_thumb_url": None,
+                    "media_name": original_name,
+                    "content": media.get("label"),
+                    "author_name": "Sistema",
+                },
             )
-            continue
 
-        msg_data = {
-            "incident_id": db_inc.id,
-            "message_type": "MEDIA",
-            "media_type": media_type or "IMAGE",
-            "media_url": media_url,
-            "media_thumb_url": None,
-            "media_name": original_name,
-            "content": media.get("label"),
-            "author_name": "Sistema",
-        }
+            # ✅ opcional mas seguro: já tenta mandar a mídia pro Chatwoot (best-effort)
+            try:
+                await chatwoot_client.send_incident_timeline_message(db_inc, db_msg)
+            except Exception:
+                logger.exception(
+                    "[chatwoot] falha ao enviar mídia (msg=%s) do incidente %s para o Chatwoot",
+                    getattr(db_msg, "id", None),
+                    db_inc.id,
+                )
 
-        await crud_incident_message.create(db, obj_in=msg_data)
-    
-        # Ao final (antes do return db_inc):
+        except Exception as exc:
+            logger.exception(
+                "[incidents] falha ao baixar/criar mídia do evento (incident=%s, url=%r): %s",
+                db_inc.id,
+                (media or {}).get("source_url") if isinstance(media, dict) else None,
+                exc,
+            )
+
+    # ------------------------------------------------------------------
+    # 4) Chatwoot: garante conversation + mensagem inicial (best-effort)
+    # ------------------------------------------------------------------
     if chatwoot_client.is_configured():
         try:
             conv_id = await chatwoot_client.send_incident_notification(db_inc)
@@ -551,8 +578,8 @@ async def create_incident_from_event(
                 db_inc.id,
             )
 
-
     return db_inc
+
 
 @router.post(
     "/{incident_id}/attachments",
@@ -612,3 +639,22 @@ async def upload_incident_attachment(
             db_inc.id,
         )
     return db_msg
+
+@router.get("/incidents/{incident_id}/messages", response_model=list[IncidentMessageRead])
+async def list_incident_messages(
+    incident_id: int,
+    after_id: int | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    stmt = select(IncidentMessage).where(IncidentMessage.incident_id == incident_id)
+
+    if after_id is not None:
+        stmt = stmt.where(IncidentMessage.id > after_id)
+
+    # ordena asc para timeline
+    stmt = stmt.order_by(IncidentMessage.id.asc()).limit(limit)
+
+    rows = (await db.execute(stmt)).scalars().all()
+    return rows

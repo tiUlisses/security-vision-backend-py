@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.models.incident import Incident
+from sqlalchemy import select, func
 from app.api.deps import get_db_session, get_current_admin_user
 from app.schemas.support_group import (
     SupportGroupCreate,
@@ -58,3 +59,29 @@ async def update_group(
     #         )
 
     return await crud_group.update_with_members(db, db_obj=group, obj_in=group_in)
+
+
+@router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_group(
+    group_id: int,
+    db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_admin_user),
+):
+    group = await crud_group.get(db, id=group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Grupo não encontrado")
+
+    # ✅ Segurança: não deletar grupo se existir incidente apontando pra ele
+    res = await db.execute(
+        select(func.count(Incident.id)).where(Incident.assigned_group_id == group_id)
+    )
+    count = res.scalar_one() or 0
+    if count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Grupo possui incidentes associados. Desative o grupo em vez de deletar.",
+        )
+
+    await db.delete(group)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

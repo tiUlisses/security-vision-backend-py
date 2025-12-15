@@ -111,6 +111,14 @@ class CRUDSupportGroup(CRUDBase[SupportGroup, SupportGroupCreate, SupportGroupUp
 
         # se vier member_ids, substitui a lista de membros
         if "member_ids" in data and data["member_ids"] is not None:
+            # ✅ garante que o relacionamento já está carregado em memória
+            # evita lazy-load em async (MissingGreenlet)
+            await db.execute(
+                select(SupportGroup)
+                .options(selectinload(SupportGroup.members))
+                .where(SupportGroup.id == db_obj.id)
+            )
+
             members = await self._get_members_by_ids(db, data["member_ids"])
             db_obj.members = members
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Optional, Any
+import asyncio
 import logging
 import mimetypes
 from pathlib import Path
@@ -16,49 +17,59 @@ from app.models.incident_message import IncidentMessage
 logger = logging.getLogger(__name__)
 
 
+class ChatwootHTTPError(RuntimeError):
+    """Erro HTTP do Chatwoot com status e corpo para tratamento robusto."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        method: str,
+        path: str,
+        url: str,
+        body_text: str = "",
+    ) -> None:
+        super().__init__(f"Chatwoot HTTP error {status_code} for {method} {path}")
+        self.status_code = status_code
+        self.method = method
+        self.path = path
+        self.url = url
+        self.body_text = body_text or ""
+
+
 class ChatwootClient:
     """
-    Cliente de integração com Chatwoot.
+    Cliente de integração com Chatwoot (best-effort: loga erro e não quebra fluxo).
 
     - Usa feature flag (CHATWOOT_ENABLED).
-    - Faz chamadas HTTP reais usando httpx.
     - Cria/usa contact "sistema" (default_contact_identifier).
     - Cria/usa conversation por incidente (source_id = incident-{id}).
-    - Atribui para inbox/time correto quando houver SupportGroup.
-    - Envia notas privadas e, quando for mídia, envia também como attachment.
-
-    Qualquer erro aqui deve ser "best-effort":
-    loga, mas NÃO quebra fluxo de incident.
+    - Resolve inbox do grupo (SupportGroup.chatwoot_inbox_identifier) ou default.
+    - Envia notas privadas e, quando for mídia, tenta enviar como attachment.
     """
 
     def __init__(self) -> None:
-        self.enabled = settings.CHATWOOT_ENABLED
+        self.enabled = bool(settings.CHATWOOT_ENABLED)
 
-        # CHATWOOT_BASE_URL pode ser AnyHttpUrl (Url do pydantic), então converte pra str
         raw_base = settings.CHATWOOT_BASE_URL
-        if raw_base:
-            self.base_url = str(raw_base).rstrip("/")
-        else:
-            self.base_url = ""
+        self.base_url = str(raw_base).rstrip("/") if raw_base else ""
 
+        # Header já usado no projeto
         self.token = settings.CHATWOOT_API_ACCESS_TOKEN
         self.account_id = settings.CHATWOOT_DEFAULT_ACCOUNT_ID
 
         self.default_inbox_identifier = settings.CHATWOOT_DEFAULT_INBOX_IDENTIFIER
         self.default_contact_identifier = settings.CHATWOOT_DEFAULT_CONTACT_IDENTIFIER
 
-        # URL base para acessar o incidente no frontend
         raw_incident_base = settings.CHATWOOT_INCIDENT_BASE_URL
-        if raw_incident_base:
-            self.incident_base_url = str(raw_incident_base).rstrip("/")
-        else:
-            self.incident_base_url = None
+        self.incident_base_url = str(raw_incident_base).rstrip("/") if raw_incident_base else None
 
-        # caches simples em memória
         self._inbox_cache: dict[str, int] = {}
         self._contact_cache: dict[str, int] = {}
 
-    # ------------------------------------------------------------------ helpers básicos
+        self._http: Optional[httpx.AsyncClient] = None
+
+    # ------------------------------ lifecycle / config
 
     def is_configured(self) -> bool:
         return bool(
@@ -69,110 +80,135 @@ class ChatwootClient:
             and self.default_inbox_identifier
         )
 
-    def _headers_json(self) -> dict[str, str]:
-        """
-        Headers para chamadas JSON (usa Content-Type: application/json).
-        NÃO usar para multipart/form-data (attachments).
-        """
-        return {
-            "api_access_token": self.token or "",
-            "Content-Type": "application/json",
-        }
+    def _get_http(self) -> httpx.AsyncClient:
+        if self._http is None:
+            # Mantém um client reaproveitável (evita overhead e melhora performance)
+            self._http = httpx.AsyncClient(timeout=20.0)
+        return self._http
 
-    def _headers_multipart(self) -> dict[str, str]:
+    async def aclose(self) -> None:
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
+
+    def _headers(self) -> dict[str, str]:
+        return {"api_access_token": self.token or ""}
+
+    def _set_incident_conversation_id(self, incident: Incident, conversation_id: int) -> None:
         """
-        Headers para chamadas multipart/form-data.
-
-        Não setamos Content-Type, o httpx define com boundary automaticamente.
+        Ajuda MUITO em fluxos que criam várias mensagens seguidas:
+        evita que send_incident_timeline_message dispare send_incident_notification repetidas vezes.
         """
-        return {
-            "api_access_token": self.token or "",
-        }
-
-    async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        """
-        Helper genérico de request JSON.
-
-        Lança RuntimeError em erro HTTP; o chamador deve tratar (try/except)
-        para não quebrar o fluxo principal.
-        """
-        url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.request(
-                method,
-                url,
-                headers=self._headers_json(),
-                **kwargs,
-            )
-
-        if resp.status_code >= 400:
-            logger.warning(
-                "[chatwoot] HTTP %s %s falhou: %s %s",
-                method,
-                url,
-                resp.status_code,
-                resp.text,
-            )
-            raise RuntimeError(
-                f"Chatwoot HTTP error {resp.status_code} for {method} {path}"
-            )
-
         try:
-            return resp.json()
-        except ValueError:
-            return {}
+            setattr(incident, "chatwoot_conversation_id", int(conversation_id))
+        except Exception:
+            # best effort
+            pass
 
-    # ------------------------------------------------------------------ helpers de mídia / paths locais
+    # ------------------------------ request helper (com retry leve)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any | None = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        files: Any | None = None,
+        retries: int = 2,
+    ) -> dict[str, Any]:
+        url = f"{self.base_url}{path}"
+        merged_headers = {**self._headers(), **(headers or {})}
+
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(retries + 1):
+            try:
+                resp = await self._get_http().request(
+                    method,
+                    url,
+                    headers=merged_headers,
+                    json=json,
+                    params=params,
+                    files=files,
+                )
+
+                if resp.status_code >= 400:
+                    body_text = resp.text or ""
+                    logger.warning(
+                        "[chatwoot] HTTP %s %s falhou: %s %s",
+                        method,
+                        url,
+                        resp.status_code,
+                        body_text[:2000],
+                    )
+
+                    if resp.status_code in (429, 502, 503, 504) and attempt < retries:
+                        await asyncio.sleep(0.6 * (2**attempt))
+                        continue
+
+                    raise ChatwootHTTPError(
+                        status_code=resp.status_code,
+                        method=method,
+                        path=path,
+                        url=url,
+                        body_text=body_text,
+                    )
+
+                try:
+                    return resp.json()
+                except ValueError:
+                    return {}
+
+            except Exception as e:
+                last_exc = e
+                if attempt < retries:
+                    await asyncio.sleep(0.6 * (2**attempt))
+                    continue
+                raise
+
+        if last_exc:
+            raise last_exc
+        return {}
+
+    # ------------------------------ helpers de payload
+
+    def _unwrap_payload(self, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return None
+        if "payload" in data:
+            return data.get("payload")
+        inner = data.get("data")
+        if isinstance(inner, dict) and "payload" in inner:
+            return inner.get("payload")
+        return None
+
+    # ------------------------------ mídia / paths locais
 
     def _media_root(self) -> Path:
-        """
-        Mesmo conceito do incident_files._get_media_root():
-        - Usa settings.MEDIA_ROOT se existir, senão 'media'.
-        """
         base = getattr(settings, "MEDIA_ROOT", None)
-        if base:
-            return Path(base)
-        return Path("media")
+        return Path(base) if base else Path("media")
 
     def _resolve_local_media_path(self, incident_id: int, media_url: str) -> Optional[Path]:
-        """
-        Converte a media_url de um IncidentMessage (que normalmente é
-        /media/incidents/{incident_id}/arquivo.ext
-        OU {MEDIA_BASE_URL}/incidents/{incident_id}/arquivo.ext)
-        para o path real no disco: MEDIA_ROOT/incidents/{incident_id}/arquivo.ext
-        """
         if not media_url:
             return None
-
         try:
             parsed = urlparse(media_url)
             path = parsed.path or media_url
             parts = path.strip("/").split("/")
             if "incidents" not in parts:
                 return None
-
             idx = parts.index("incidents")
             if len(parts) < idx + 3:
-                # incidents / {id} / file
                 return None
-
-            # Opcionalmente poderíamos conferir o id
-            # parts[idx+1] deveria ser str(incident_id), mas não vamos travar se não for
             rel = Path(*parts[idx:])  # incidents/{id}/arquivo.ext
-            local_path = self._media_root() / rel
-            return local_path
+            return self._media_root() / rel
         except Exception:
-            logger.exception(
-                "[chatwoot] erro ao resolver path local para media_url=%r",
-                media_url,
-            )
+            logger.exception("[chatwoot] erro ao resolver path local para media_url=%r", media_url)
             return None
 
     def _chatwoot_file_type(self, media_type: Optional[str]) -> str:
-        """
-        Converte IncidentMessage.media_type (IMAGE/VIDEO/AUDIO/FILE)
-        para file_type aceito pelo Chatwoot (image/video/audio/document).
-        """
         mt = (media_type or "").upper()
         if mt == "IMAGE":
             return "image"
@@ -180,136 +216,215 @@ class ChatwootClient:
             return "video"
         if mt == "AUDIO":
             return "audio"
-        # default
         return "document"
 
-    # ------------------------------------------------------------------ inbox / contact
+    def _format_author_content(self, author_name: Optional[str], content: str) -> str:
+        base = (content or "").strip()
+        author = (author_name or "").strip()
+        if not author:
+            return base
+        if not base:
+            return author
+        return f"{author}:\n{base}"
+
+    def _looks_like_duplicate_source_id(self, status_code: int, body_text: str) -> bool:
+        if status_code != 422:
+            return False
+        bt = (body_text or "").lower()
+        # Mensagens variam por versão/instalação
+        return (
+            "has already been taken" in bt
+            or "already taken" in bt
+            or "source" in bt
+            or "source_id" in bt
+            or "source id" in bt
+        )
+
+    # ------------------------------ inbox / contact
 
     async def _resolve_inbox_id(self, identifier: str) -> Optional[int]:
-        """
-        identifier pode ser:
-        - id numérico em string: "1"
-        - ou o identifier/name da inbox no chatwoot.
-        """
         if not identifier:
             return None
 
         if identifier in self._inbox_cache:
             return self._inbox_cache[identifier]
 
-        # se for só número, já usa direto
         if identifier.isdigit():
             inbox_id = int(identifier)
             self._inbox_cache[identifier] = inbox_id
             return inbox_id
 
-        data = await self._request(
-            "GET",
-            f"/api/v1/accounts/{self.account_id}/inboxes",
-        )
+        data = await self._request("GET", f"/api/v1/accounts/{self.account_id}/inboxes")
         payload = data.get("payload") or []
 
         for inbox in payload:
-            if (
-                inbox.get("identifier") == identifier
-                or inbox.get("name") == identifier
-            ):
+            if inbox.get("identifier") == identifier or inbox.get("name") == identifier:
                 inbox_id = int(inbox["id"])
                 self._inbox_cache[identifier] = inbox_id
                 return inbox_id
 
-        logger.warning(
-            "[chatwoot] inbox com identifier/name '%s' não encontrada.",
-            identifier,
-        )
+        logger.warning("[chatwoot] inbox com identifier/name '%s' não encontrada.", identifier)
+        return None
+
+    async def _find_contact_id_by_identifier(self, identifier: str) -> Optional[int]:
+        if not identifier:
+            return None
+
+        attempts = [{"q": identifier}, {"identifier": identifier}]
+
+        for params in attempts:
+            try:
+                data = await self._request(
+                    "GET",
+                    f"/api/v1/accounts/{self.account_id}/contacts/search",
+                    params=params,
+                )
+            except ChatwootHTTPError:
+                continue
+
+            payload = data.get("payload") if isinstance(data, dict) else None
+
+            if isinstance(payload, list):
+                for c in payload:
+                    if isinstance(c, dict) and c.get("identifier") == identifier and c.get("id") is not None:
+                        return int(c["id"])
+                for c in payload:
+                    if isinstance(c, dict) and c.get("id") is not None:
+                        return int(c["id"])
+
+            if isinstance(payload, dict):
+                cid = payload.get("id")
+                if cid is not None:
+                    return int(cid)
+                contact = payload.get("contact")
+                if isinstance(contact, dict) and contact.get("id") is not None:
+                    return int(contact["id"])
+
+            if isinstance(data, dict) and data.get("id") is not None:
+                return int(data["id"])
+
         return None
 
     async def _get_or_create_contact(self, identifier: str) -> Optional[int]:
-        """
-        Usa o campo 'identifier' do contact no chatwoot.
-        """
         if not identifier:
             return None
 
         if identifier in self._contact_cache:
             return self._contact_cache[identifier]
 
-        # tenta buscar
-        data = await self._request(
-            "GET",
-            f"/api/v1/accounts/{self.account_id}/contacts/search",
-            params={"identifier": identifier},
-        )
-        payload = data.get("payload") or {}
+        existing = await self._find_contact_id_by_identifier(identifier)
+        if existing:
+            self._contact_cache[identifier] = existing
+            return existing
 
-        contact_id = payload.get("id")
-        if contact_id:
-            cid = int(contact_id)
-            self._contact_cache[identifier] = cid
-            return cid
+        body = {"identifier": identifier, "name": "SecurityVision"}
 
-        # não existe: cria
-        body = {
-            "identifier": identifier,
-            "name": "SecurityVision",
-        }
-        data = await self._request(
-            "POST",
-            f"/api/v1/accounts/{self.account_id}/contacts",
-            json=body,
-        )
-        payload = data.get("payload") or data
-        contact_id = payload.get("id")
-        if not contact_id:
-            logger.warning(
-                "[chatwoot] não foi possível obter id do contact para identifier=%s",
-                identifier,
+        try:
+            data = await self._request(
+                "POST",
+                f"/api/v1/accounts/{self.account_id}/contacts",
+                json=body,
             )
+        except ChatwootHTTPError as e:
+            if e.status_code == 422 and "identifier has already been taken" in (e.body_text or "").lower():
+                recovered = await self._find_contact_id_by_identifier(identifier)
+                if recovered:
+                    self._contact_cache[identifier] = recovered
+                    return recovered
+            raise
+
+        payload = data.get("payload") if isinstance(data, dict) else None
+        contact = payload["contact"] if isinstance(payload, dict) and isinstance(payload.get("contact"), dict) else payload
+        cid = int(contact["id"]) if isinstance(contact, dict) and contact.get("id") else None
+
+        if not cid:
+            logger.warning("[chatwoot] resposta de criação de contact sem id: %r", data)
             return None
 
-        cid = int(contact_id)
         self._contact_cache[identifier] = cid
         return cid
 
-    # ------------------------------------------------------------------ conversas
+    # ------------------------------ conversas
 
-    async def _ensure_conversation(self, incident: Incident) -> Optional[int]:
-        """
-        Garante que exista uma conversation para este incidente.
+    async def _find_conversation_for_incident(
+        self,
+        *,
+        inbox_id: int,
+        incident_id: int,
+        incident_created_at: Optional[str],
+    ) -> Optional[int]:
+        filters: list[dict[str, Any]] = [
+            {
+                "attribute_key": "incident_id",
+                "filter_operator": "equal_to",
+                "values": [str(incident_id)],
+                "query_operator": "AND",
+            },
+            {
+                "attribute_key": "inbox_id",
+                "filter_operator": "equal_to",
+                "values": [str(inbox_id)],
+                "query_operator": "AND",
+            },
+        ]
 
-        - Se já tiver chatwoot_conversation_id no incidente, usa direto.
-        - Senão, cria conversation com:
-          - inbox do grupo (ou default)
-          - team_id do grupo (se tiver)
-          - contact default (identifier global)
-          - source_id = incident-{id}
-        """
-        if incident.chatwoot_conversation_id:
-            return incident.chatwoot_conversation_id
-
-        group = getattr(incident, "assigned_group", None)
-
-        inbox_identifier = (
-            getattr(group, "chatwoot_inbox_identifier", None)
-            or self.default_inbox_identifier
-        )
-        inbox_id = await self._resolve_inbox_id(inbox_identifier)
-        if not inbox_id:
-            logger.warning(
-                "[chatwoot] não consegui resolver inbox_id para incidente %s",
-                incident.id,
+        if incident_created_at:
+            filters.insert(
+                1,
+                {
+                    "attribute_key": "incident_created_at",
+                    "filter_operator": "equal_to",
+                    "values": [incident_created_at],
+                    "query_operator": "AND",
+                },
             )
+
+        try:
+            data = await self._request(
+                "POST",
+                f"/api/v1/accounts/{self.account_id}/conversations/filter",
+                json={"payload": filters},
+            )
+        except ChatwootHTTPError:
             return None
 
-        contact_identifier = (
-            self.default_contact_identifier or "securityvision-system"
+        payload = self._unwrap_payload(data)
+        if isinstance(payload, list) and payload:
+            first = payload[0]
+            if isinstance(first, dict) and first.get("id") is not None:
+                return int(first["id"])
+        return None
+
+    async def _ensure_conversation(self, incident: Incident) -> Optional[int]:
+        if incident.chatwoot_conversation_id:
+            return int(incident.chatwoot_conversation_id)
+
+        incident_created_at: Optional[str] = None
+        if getattr(incident, "created_at", None):
+            try:
+                incident_created_at = incident.created_at.isoformat()
+            except Exception:
+                incident_created_at = None
+
+        group = getattr(incident, "assigned_group", None)
+        inbox_identifier = (getattr(group, "chatwoot_inbox_identifier", None) or self.default_inbox_identifier)
+        inbox_id = await self._resolve_inbox_id(inbox_identifier)
+        if not inbox_id:
+            logger.warning("[chatwoot] não consegui resolver inbox_id para incidente %s", incident.id)
+            return None
+
+        existing_conv_id = await self._find_conversation_for_incident(
+            inbox_id=inbox_id,
+            incident_id=incident.id,
+            incident_created_at=incident_created_at,
         )
+        if existing_conv_id:
+            return existing_conv_id
+
+        contact_identifier = self.default_contact_identifier or "securityvision-system"
         contact_id = await self._get_or_create_contact(contact_identifier)
         if not contact_id:
-            logger.warning(
-                "[chatwoot] não consegui resolver contact_id para incidente %s",
-                incident.id,
-            )
+            logger.warning("[chatwoot] não consegui resolver contact_id para incidente %s", incident.id)
             return None
 
         body: dict[str, Any] = {
@@ -319,51 +434,45 @@ class ChatwootClient:
             "status": "open",
             "custom_attributes": {
                 "incident_id": incident.id,
+                "incident_created_at": incident_created_at,
                 "severity": incident.severity,
                 "status": incident.status,
                 "tenant": incident.tenant,
+                "device_id": incident.device_id,
             },
         }
 
         team_id = getattr(group, "chatwoot_team_id", None)
         if team_id:
-            # se não tiver grupo, NÃO manda team_id → conversa fica "para todos"
             body["team_id"] = team_id
 
-        data = await self._request(
-            "POST",
-            f"/api/v1/accounts/{self.account_id}/conversations",
-            json=body,
-        )
+        try:
+            data = await self._request(
+                "POST",
+                f"/api/v1/accounts/{self.account_id}/conversations",
+                json=body,
+            )
+        except ChatwootHTTPError as e:
+            if e.status_code == 422:
+                recovered = await self._find_conversation_for_incident(
+                    inbox_id=inbox_id,
+                    incident_id=incident.id,
+                    incident_created_at=incident_created_at,
+                )
+                if recovered:
+                    return recovered
+            raise
+
         payload = data.get("payload") or data
         conv_id = payload.get("id")
         if not conv_id:
-            logger.warning(
-                "[chatwoot] resposta de criação de conversation sem id: %r",
-                data,
-            )
+            logger.warning("[chatwoot] resposta de criação de conversation sem id: %r", data)
             return None
-
         return int(conv_id)
 
-    # ------------------------------------------------------------------ envio de mensagem com attachment
+    # ------------------------------ envio: attachment
 
-    async def _send_attachment_message(
-        self,
-        conversation_id: int,
-        message: IncidentMessage,
-    ) -> bool:
-        """
-        Envia uma mensagem com attachment para a conversation no Chatwoot.
-
-        Usa multipart/form-data:
-
-        - attachments[] (arquivo)
-        - content
-        - message_type = outgoing
-        - private = true
-        - file_type = image|video|audio|document
-        """
+    async def _send_attachment_message(self, conversation_id: int, message: IncidentMessage) -> bool:
         if not message.media_url:
             return False
 
@@ -373,54 +482,55 @@ class ChatwootClient:
         )
         if not local_path or not local_path.exists():
             logger.warning(
-                "[chatwoot] não encontrei arquivo local para media_url=%r (incident_id=%s)",
+                "[chatwoot] não encontrei arquivo local para media_url=%r (incident_id=%s). path=%r media_root=%r",
                 message.media_url,
                 message.incident_id,
+                str(local_path) if local_path else None,
+                str(self._media_root()),
             )
             return False
 
         file_type = self._chatwoot_file_type(message.media_type)
         mime_type, _ = mimetypes.guess_type(local_path.name)
-        if not mime_type:
-            mime_type = "application/octet-stream"
+        mime_type = mime_type or "application/octet-stream"
 
-        # conteúdo de texto (incluindo nome do operador, se houver)
-        base_content = (message.content or "").strip()
-        author = (message.author_name or "").strip()
-        if author:
-            if base_content:
-                content = f"{author}:\n{base_content}"
-            else:
-                content = author
-        else:
-            content = base_content
-
-        url = f"{self.base_url}/api/v1/accounts/{self.account_id}/conversations/{conversation_id}/messages"
+        content = self._format_author_content(message.author_name, message.content or "")
+        url_path = f"/api/v1/accounts/{self.account_id}/conversations/{conversation_id}/messages"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                with local_path.open("rb") as f:
-                    files = {
-                        "attachments[]": (local_path.name, f, mime_type),
-                        "content": (None, content),
-                        "message_type": (None, "outgoing"),
-                        "private": (None, "true"),
-                        "file_type": (None, file_type),
-                        # 👇 Rails-style para nested params: content_attributes[sv_source] -> { content_attributes: { sv_source: "securityvision" } }
-                        "content_attributes[sv_source]": (None, "securityvision"),
-                        "source_id": (None, f"sv-msg-{message.id}"),
-                    }
-                    resp = await client.post(
-                        url,
-                        headers=self._headers_multipart(),
-                        files=files,
-                    )
+            with local_path.open("rb") as f:
+                files = {
+                    "attachments[]": (local_path.name, f, mime_type),
+                    "content": (None, content),
+                    "message_type": (None, "outgoing"),
+                    "private": (None, "true"),
+                    "file_type": (None, file_type),
+                    "content_attributes[sv_source]": (None, "securityvision"),
+                    "source_id": (None, f"sv-msg-{message.id}"),
+                }
+                resp = await self._get_http().post(
+                    f"{self.base_url}{url_path}",
+                    headers=self._headers(),
+                    files=files,
+                    timeout=60.0,  # attachments podem ser mais lentos
+                )
 
             if resp.status_code >= 400:
+                body_text = resp.text or ""
+                if self._looks_like_duplicate_source_id(resp.status_code, body_text):
+                    # idempotência: se o Chatwoot já tem essa msg, tratamos como ok
+                    logger.info(
+                        "[chatwoot] attachment já enviado (422 duplicate source_id). incidente=%s msg=%s conv=%s",
+                        message.incident_id,
+                        message.id,
+                        conversation_id,
+                    )
+                    return True
+
                 logger.warning(
                     "[chatwoot] upload de attachment falhou (%s): %s",
                     resp.status_code,
-                    resp.text,
+                    body_text[:2000],
                 )
                 return False
 
@@ -434,42 +544,25 @@ class ChatwootClient:
             )
             return False
 
-    # ------------------------------------------------------------------ API pública: incidente criado/atualizado
+    # ------------------------------ API pública
 
-    async def send_incident_notification(
-        self,
-        incident: Incident,
-        incident_url: Optional[str] = None,
-    ) -> Optional[int]:
-        """
-        Envia (ou atualiza) uma mensagem no Chatwoot referente a este incidente.
-
-        - Garante que exista uma conversation (ver _ensure_conversation).
-        - Envia uma nota privada com resumo + link do incidente.
-        - Retorna o conversation_id se conseguir, senão None.
-        """
-
+    async def send_incident_notification(self, incident: Incident, incident_url: Optional[str] = None) -> Optional[int]:
         if not self.is_configured():
-            logger.info(
-                "[chatwoot] integração desabilitada ou não configurada. "
-                "Não enviando notificação para incidente %s.",
-                incident.id,
-            )
+            logger.info("[chatwoot] integração desabilitada/não configurada. incidente=%s", incident.id)
             return incident.chatwoot_conversation_id
 
         try:
             conversation_id = await self._ensure_conversation(incident)
         except Exception:
-            logger.exception(
-                "[chatwoot] erro ao garantir conversation para incidente %s",
-                incident.id,
-            )
+            logger.exception("[chatwoot] erro ao garantir conversation para incidente %s", incident.id)
             return incident.chatwoot_conversation_id
 
         if not conversation_id:
             return incident.chatwoot_conversation_id
 
-        # monta URL amigável se não vier explícita
+        # ✅ importante: evita duplicar resumo em cascata de mensagens no mesmo request
+        self._set_incident_conversation_id(incident, int(conversation_id))
+
         if not incident_url and self.incident_base_url:
             incident_url = f"{self.incident_base_url}/{incident.id}"
 
@@ -480,8 +573,7 @@ class ChatwootClient:
         ]
         if incident.assigned_group:
             summary_lines.append(
-                f"Grupo: {incident.assigned_group.name} "
-                f"(team_id={incident.assigned_group.chatwoot_team_id or '-'})"
+                f"Grupo: {incident.assigned_group.name} (team_id={incident.assigned_group.chatwoot_team_id or '-'})"
             )
         if incident_url:
             summary_lines.append(f"Acesse: {incident_url}")
@@ -491,24 +583,22 @@ class ChatwootClient:
         try:
             await self._request(
                 "POST",
-                f"/api/v1/accounts/{self.account_id}/conversations/{conversation_id}/messages",
+                f"/api/v1/accounts/{self.account_id}/conversations/{int(conversation_id)}/messages",
                 json={
                     "content": content,
                     "message_type": "outgoing",
-                    "private": True,  # nota interna
-                    "source_id": f"sv-incident-{incident.id}",  # 👈 marca como vindo do SV
-                    "content_attributes": {
-                        "sv_source": "securityvision",
-                    },
+                    "private": True,
+                    "source_id": f"sv-incident-{incident.id}",
+                    "content_attributes": {"sv_source": "securityvision"},
                 },
             )
+        except ChatwootHTTPError as e:
+            if e.status_code != 422:
+                logger.exception("[chatwoot] erro ao enviar mensagem inicial do incidente %s", incident.id)
         except Exception:
-            logger.exception(
-                "[chatwoot] erro ao enviar mensagem inicial do incidente %s",
-                incident.id,
-            )
+            logger.exception("[chatwoot] erro ao enviar mensagem inicial do incidente %s", incident.id)
 
-        return conversation_id
+        return int(conversation_id)
 
     async def send_incident_timeline_message(
         self,
@@ -516,67 +606,30 @@ class ChatwootClient:
         message: IncidentMessage,
         incident_url: Optional[str] = None,
     ) -> None:
-        """
-        Envia uma mensagem da timeline do incidente para a conversa
-        correspondente no Chatwoot como nota privada.
-
-        - Se o incidente ainda não tem conversation, chama send_incident_notification.
-        - Se for mensagem de mídia (MEDIA), tenta enviar como attachment.
-        """
-
         if not self.is_configured():
-            logger.info(
-                "[chatwoot] integração desabilitada. "
-                "Não enviando mensagem %s do incidente %s.",
-                message.id,
-                incident.id,
-            )
+            logger.info("[chatwoot] integração desabilitada. incidente=%s msg=%s", incident.id, message.id)
             return
 
         conversation_id = incident.chatwoot_conversation_id
         if not conversation_id:
-            # tenta criar conversation e mandar resumo primeiro
-            conversation_id = await self.send_incident_notification(
-                incident,
-                incident_url=incident_url,
-            )
+            conversation_id = await self.send_incident_notification(incident, incident_url=incident_url)
             if not conversation_id:
                 return
 
-        # Se for mídia, tentamos attachment primeiro
+        # ✅ garante “cache” local no objeto (evita loops de resumo)
+        self._set_incident_conversation_id(incident, int(conversation_id))
+
+        # tenta attachment primeiro
         if message.message_type == "MEDIA" and message.media_url:
-            ok = await self._send_attachment_message(conversation_id, message)
+            ok = await self._send_attachment_message(int(conversation_id), message)
             if ok:
-                # já mandamos com arquivo + texto, não precisa mandar nota extra
                 return
-            # se falhar, caímos no fallback de texto com link
 
-        # Fallback / mensagens não-MEDIA: nota de texto simples
-        base_content = (message.content or "").strip()
-        author = (message.author_name or "").strip()
-        if author:
-            if base_content:
-                content = f"{author}:\n{base_content}"
-            else:
-                content = author
-        else:
-            content = base_content
+        content = self._format_author_content(message.author_name, message.content or "")
 
-        # Se for mídia e não conseguimos attachment, adiciona link
         if message.message_type == "MEDIA" and message.media_url:
             media_line = f"[arquivo anexado]: {message.media_url}"
-            if content:
-                content = content + "\n\n" + media_line
-            else:
-                content = media_line
-
-        # Se for mídia e não conseguimos attachment, adiciona link
-        if message.message_type == "MEDIA" and message.media_url:
-            media_line = f"[arquivo anexado]: {message.media_url}"
-            if content:
-                content = content + "\n\n" + media_line
-            else:
-                content = media_line
+            content = f"{content}\n\n{media_line}" if content else media_line
 
         if not content:
             return
@@ -584,20 +637,17 @@ class ChatwootClient:
         try:
             await self._request(
                 "POST",
-                f"/api/v1/accounts/{self.account_id}/conversations/{conversation_id}/messages",
+                f"/api/v1/accounts/{self.account_id}/conversations/{int(conversation_id)}/messages",
                 json={
-                    "content": content,  # 👈 agora usamos o content completo
+                    "content": content,
                     "message_type": "outgoing",
                     "private": True,
-                    "source_id": f"sv-msg-{message.id}",  # 👈 marca que veio do SV
-                    "content_attributes": {
-                        "sv_source": "securityvision",
-                    },
+                    "source_id": f"sv-msg-{message.id}",
+                    "content_attributes": {"sv_source": "securityvision"},
                 },
             )
+        except ChatwootHTTPError as e:
+            if e.status_code != 422:
+                logger.exception("[chatwoot] erro ao enviar msg=%s incidente=%s", message.id, incident.id)
         except Exception:
-            logger.exception(
-                "[chatwoot] erro ao enviar mensagem %s do incidente %s",
-                message.id,
-                incident.id,
-            )
+            logger.exception("[chatwoot] erro ao enviar msg=%s incidente=%s", message.id, incident.id)

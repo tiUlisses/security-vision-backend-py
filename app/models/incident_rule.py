@@ -105,3 +105,5 @@ class IncidentRule(Base):
         "User",
         foreign_keys=[assigned_to_user_id],
     )
+    assigned_group_id = Column(Integer, ForeignKey("support_groups.id"), nullable=True)  # ✅
+    assigned_group = relationship("SupportGroup", lazy="selectin")  # opcional, mas útil

@@ -22,6 +22,7 @@ class UserUpdate(BaseModel):
     role: Optional[str] = Field(None, max_length=32)
     is_active: Optional[bool] = None
     chatwoot_agent_id: Optional[int] = None   # 🔹 novo
+    is_superuser: Optional[bool] = None
 
 class UserRead(UserBase):
     id: int
