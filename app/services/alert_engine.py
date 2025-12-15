@@ -80,52 +80,97 @@ async def _get_location_info(
     Retorna um dict com IDs e nomes de planta, andar e prédio.
     """
     floor_plan_id = getattr(device, "floor_plan_id", None)
-    if not floor_plan_id:
-        return {
-            "floor_plan_id": None,
-            "floor_plan_name": None,
-            "floor_id": None,
-            "floor_name": None,
-            "building_id": None,
-            "building_name": None,
-        }
+    floor_id = getattr(device, "floor_id", None)
+    building_id = getattr(device, "building_id", None)
 
-    stmt = (
-        select(
-            FloorPlan.id,
-            FloorPlan.name,
-            Floor.id,
-            Floor.name,
-            Building.id,
-            Building.name,
+    # 1) Se tiver planta, é a fonte de verdade (mantém comportamento antigo)
+    if floor_plan_id:
+        stmt = (
+            select(
+                FloorPlan.id,
+                FloorPlan.name,
+                Floor.id,
+                Floor.name,
+                Building.id,
+                Building.name,
+            )
+            .select_from(FloorPlan)
+            .outerjoin(Floor, FloorPlan.floor_id == Floor.id)
+            .outerjoin(Building, Floor.building_id == Building.id)
+            .where(FloorPlan.id == floor_plan_id)
         )
-        .select_from(FloorPlan)
-        .outerjoin(Floor, FloorPlan.floor_id == Floor.id)
-        .outerjoin(Building, Floor.building_id == Building.id)
-        .where(FloorPlan.id == floor_plan_id)
-    )
-    res = await db.execute(stmt)
-    row = res.first()
+        res = await db.execute(stmt)
+        row = res.first()
 
-    if not row:
-        # Pelo menos devolve o id da planta
+        if not row:
+            return {
+                "floor_plan_id": floor_plan_id,
+                "floor_plan_name": None,
+                "floor_id": None,
+                "floor_name": None,
+                "building_id": None,
+                "building_name": None,
+            }
+
+        fp_id, fp_name, fl_id, fl_name, bld_id, bld_name = row
         return {
-            "floor_plan_id": floor_plan_id,
-            "floor_plan_name": None,
-            "floor_id": None,
-            "floor_name": None,
-            "building_id": None,
-            "building_name": None,
+            "floor_plan_id": fp_id,
+            "floor_plan_name": fp_name,
+            "floor_id": fl_id,
+            "floor_name": fl_name,
+            "building_id": bld_id,
+            "building_name": bld_name,
         }
 
-    fp_id, fp_name, fl_id, fl_name, bld_id, bld_name = row
+    # 2) Sem planta: usa building_id / floor_id vindos do MQTT (gateways)
+    if floor_id:
+        stmt = (
+            select(
+                Floor.id,
+                Floor.name,
+                Building.id,
+                Building.name,
+            )
+            .select_from(Floor)
+            .outerjoin(Building, Floor.building_id == Building.id)
+            .where(Floor.id == floor_id)
+        )
+        res = await db.execute(stmt)
+        row = res.first()
+        if row:
+            fl_id, fl_name, bld_id, bld_name = row
+            return {
+                "floor_plan_id": None,
+                "floor_plan_name": None,
+                "floor_id": fl_id,
+                "floor_name": fl_name,
+                "building_id": bld_id,
+                "building_name": bld_name,
+            }
+
+    if building_id:
+        stmt = select(Building.id, Building.name).where(Building.id == building_id)
+        res = await db.execute(stmt)
+        row = res.first()
+        if row:
+            bld_id, bld_name = row
+            return {
+                "floor_plan_id": None,
+                "floor_plan_name": None,
+                "floor_id": None,
+                "floor_name": None,
+                "building_id": bld_id,
+                "building_name": bld_name,
+            }
+
+    # 3) Sem info
     return {
-        "floor_plan_id": fp_id,
-        "floor_plan_name": fp_name,
-        "floor_id": fl_id,
-        "floor_name": fl_name,
-        "building_id": bld_id,
-        "building_name": bld_name,
+        "floor_plan_id": None,
+        "floor_plan_name": None,
+        "floor_id": None,
+        "floor_name": None,
+        "building_id": None,
+        "building_name": None,
     }
 
 

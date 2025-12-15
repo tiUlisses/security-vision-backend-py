@@ -1,29 +1,36 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Dict, Optional
-
+import re
+import unicodedata
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Iterable, Optional, Tuple
+from app.crud import device as crud_device
 from asyncio_mqtt import Client, MqttError
 from sqlalchemy import select
-
+from app.crud.device import get_or_create_gateway_by_mac
 from app.core.config import Settings, settings
 from app.db.session import AsyncSessionLocal
-from app.schemas import CollectionLogCreate, DeviceCreate
+from app.models import Building, Floor
+from app.models.device import Device
+from app.schemas import CollectionLogCreate
 from app.services.alert_engine import (
-    process_detection,
     fire_gateway_offline_event,
     fire_gateway_online_event,
+    process_detection,
 )
-from app.models.device import Device
+from app.utils.mac import normalize_mac
 
 logger = logging.getLogger("rtls.mqtt_ingestor")
 
 
-def _decode_payload(payload: bytes) -> Optional[dict]:
-    """
-    Decodifica payload MQTT para dict JSON.
-    Retorna None se não conseguir decodificar.
+def _decode_payload(payload: bytes) -> Optional[Any]:
+    """Decode MQTT payload into Python object.
+
+    Supports:
+    - dict (single record)
+    - list (batch records)  ✅ (your gateway sends this)
     """
     try:
         text = payload.decode("utf-8")
@@ -32,41 +39,47 @@ def _decode_payload(payload: bytes) -> Optional[dict]:
         return None
 
     try:
-        data = json.loads(text)
-        return data
+        return json.loads(text)
     except json.JSONDecodeError:
         logger.warning("Received non-JSON MQTT payload: %s", text)
         return None
 
 
+def _slug(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")
+
+
+@dataclass(frozen=True)
+class GatewayTopicInfo:
+    """Parsed gateway topic."""
+
+    tenant: Optional[str]
+    building: Optional[str]
+    floor: Optional[str]
+    gateway_id: Optional[str]
+    kind: Optional[str]
+    is_new_format: bool
+
+
 class MqttIngestor:
-    """
-    Ingestor MQTT:
+    """MQTT ingestor for RTLS gateways.
 
-    - Tudo que chegar em tópicos com prefixo MQTT_GATEWAY_TOPIC_PREFIX:
-        * é considerado tráfego de GATEWAY
-        * auto-cadastra Device (se não existir)
-        * atualiza last_seen_at (para online/offline)
+    Accepts both formats:
 
-    - Mensagens de detecção (TAG vista por GATEWAY), normalmente em tópico MQTT_TOPIC
-      (ex: "rtls/detections" ou algo sob o prefixo do gateway):
-        * se Tag conhecida -> grava CollectionLog
-        * se Tag desconhecida -> IGNORA (cadastro manual de tags)
-        * garante que o gateway exista (auto-cadastro se necessário)
-        * atualiza last_seen_at do gateway
-        * dispara process_detection() para regras/alertas
+    New (camera-like):
+        rtls/gateways/<tenant>/<building>/<floor>/gateway/<gateway_id>/<kind>
 
-    - Monitor interno de OFFLINE:
-        * periodicamente lê devices BLE_GATEWAY
-        * calcula se passaram mais que DEVICE_OFFLINE_THRESHOLD_SECONDS sem publicar
-        * detecta transições ONLINE -> OFFLINE e OFFLINE -> ONLINE
-        * chama handlers (_handle_gateway_offline / _handle_gateway_online) para você plugar
-          em AlertEvent / Webhook no futuro.
+    Legacy:
+        rtls/gateways/<gateway_id>/<kind>
     """
 
-    # chaves do payload para facilitar adaptação ao gateway real
-    TAG_MAC_KEYS = ("tag_mac", "tag", "tagMac")
-    GATEWAY_MAC_KEYS = ("gateway_mac", "gateway", "gw_mac", "device_mac")
+    # legacy dict keys (kept for compatibility)
+    TAG_MAC_KEYS = ("tag_mac", "tag", "tagMac", "mac")
+    GATEWAY_MAC_KEYS = ("gateway_mac", "gateway", "gw_mac", "device_mac", "mac")
     RSSI_KEYS = ("rssi", "RSSI")
 
     def __init__(
@@ -79,7 +92,6 @@ class MqttIngestor:
         self.session_factory = session_factory
         self._stopped = False
 
-        # Intervalo do monitor de offline (segundos)
         if offline_check_interval_seconds is not None:
             self.offline_check_interval_seconds = offline_check_interval_seconds
         else:
@@ -87,27 +99,15 @@ class MqttIngestor:
             base = threshold // 2 or 5
             self.offline_check_interval_seconds = max(5, min(60, base))
 
-        # Estado em memória para detectar transições online/offline
-        # device_id -> is_online (bool)
+        # device_id -> is_online
         self._gateway_status_cache: Dict[int, bool] = {}
 
     # ------------------------------------------------------------------
-    # Helpers internos de tópico e payload
+    # Topic parsing
     # ------------------------------------------------------------------
 
-    def _extract_gateway_id_from_topic(self, topic: str) -> Optional[str]:
-        """
-        Extrai o identificador (geralmente MAC ou código) do gateway
-        a partir do tópico, usando o prefixo configurado.
-
-        Exemplo:
-            prefixo = "rtls/gw"
-            topic   = "rtls/gw/AA:BB:CC:DD:EE:FF/heartbeat"
-            -> retorna "AA:BB:CC:DD:EE:FF"
-
-        Se, no futuro, o seu gateway real usar outra estrutura de tópico,
-        é só ajustar este método.
-        """
+    def _parse_gateway_topic(self, topic: str) -> Optional[GatewayTopicInfo]:
+        """Parse gateway topic into tenant/building/floor/gateway_id/kind."""
         prefix = self.settings.MQTT_GATEWAY_TOPIC_PREFIX.rstrip("/")
         if not topic.startswith(prefix):
             return None
@@ -116,174 +116,294 @@ class MqttIngestor:
         if not rest:
             return None
 
-        parts = rest.split("/")
-        return parts[0] if parts else None
+        parts = [p for p in rest.split("/") if p]
 
-    def _extract_tag_mac_from_data(self, data: dict) -> Optional[str]:
-        """
-        Tenta obter o MAC da TAG a partir do payload JSON, usando
-        as chaves definidas em TAG_MAC_KEYS.
-        """
-        for key in self.TAG_MAC_KEYS:
-            value = data.get(key)
-            if value:
-                return str(value).strip()
-        return None
+        # New format:
+        # <tenant>/<building>/<floor>/gateway/<gateway_id>/<kind?>
+        if len(parts) >= 5 and parts[3].lower() == "gateway":
+            tenant = parts[0]
+            building = parts[1]
+            floor = parts[2]
+            gateway_id = parts[4]
+            kind = parts[5] if len(parts) >= 6 else None
+            return GatewayTopicInfo(
+                tenant=tenant,
+                building=building,
+                floor=floor,
+                gateway_id=gateway_id,
+                kind=kind,
+                is_new_format=True,
+            )
 
-    def _extract_gateway_mac_from_data(self, data: dict, topic: str) -> Optional[str]:
-        """
-        Tenta obter o MAC do gateway a partir do payload JSON e,
-        se não encontrar, tenta extrair do tópico MQTT.
-        """
-        for key in self.GATEWAY_MAC_KEYS:
-            value = data.get(key)
-            if value:
-                return str(value).strip()
+        # Legacy format:
+        # <gateway_id>/<kind?>
+        gateway_id = parts[0] if parts else None
+        kind = parts[1] if len(parts) >= 2 else None
+        return GatewayTopicInfo(
+            tenant=None,
+            building=None,
+            floor=None,
+            gateway_id=gateway_id,
+            kind=kind,
+            is_new_format=False,
+        )
 
-        return self._extract_gateway_id_from_topic(topic)
+    # ------------------------------------------------------------------
+    # Location resolution (building/floor)
+    # ------------------------------------------------------------------
 
-    def _extract_rssi_from_data(self, data: dict) -> Optional[int]:
-        """
-        Tenta obter RSSI como int a partir do payload JSON.
-        """
-        for key in self.RSSI_KEYS:
-            value = data.get(key)
-            if value is not None:
+    async def _resolve_building_floor_ids(
+        self,
+        db,
+        building_seg: Optional[str],
+        floor_seg: Optional[str],
+    ) -> Tuple[Optional[int], Optional[int]]:
+        if not building_seg:
+            return None, None
+
+        building_seg = str(building_seg).strip()
+        floor_seg = str(floor_seg).strip() if floor_seg else None
+
+        # Prefer exact match on Building.code (case-insensitive), then fallback to slug(name)
+        stmt = select(Building)
+        res = await db.execute(stmt)
+        buildings = list(res.scalars().all())
+
+        b = None
+        seg_slug = _slug(building_seg)
+        for cand in buildings:
+            if cand.code and cand.code.lower() == building_seg.lower():
+                b = cand
+                break
+        if b is None:
+            for cand in buildings:
+                if _slug(cand.name) == seg_slug or (cand.code and _slug(cand.code) == seg_slug):
+                    b = cand
+                    break
+
+        if b is None:
+            logger.warning(
+                "MQTT: building '%s' not found in DB. Gateway will be created unassigned.",
+                building_seg,
+            )
+            return None, None
+
+        building_id = b.id
+        floor_id: Optional[int] = None
+
+        if floor_seg:
+            stmt_f = select(Floor).where(Floor.building_id == building_id)
+            res_f = await db.execute(stmt_f)
+            floors = list(res_f.scalars().all())
+
+            # numeric -> match by level
+            level: Optional[int] = None
+            try:
+                if re.fullmatch(r"-?\d+", floor_seg):
+                    level = int(floor_seg)
+            except Exception:
+                level = None
+
+            if level is not None:
+                for fl in floors:
+                    if fl.level == level:
+                        floor_id = fl.id
+                        break
+
+            if floor_id is None:
+                seg_slug = _slug(floor_seg)
+                for fl in floors:
+                    if _slug(fl.name) == seg_slug:
+                        floor_id = fl.id
+                        break
+
+            if floor_id is None:
+                logger.warning(
+                    "MQTT: floor '%s' not found for building '%s'. Gateway will keep only building_id.",
+                    floor_seg,
+                    b.code,
+                )
+
+        return building_id, floor_id
+
+    # ------------------------------------------------------------------
+    # Payload parsing (detections)
+    # ------------------------------------------------------------------
+
+    def _extract_int(self, obj: dict, keys: Iterable[str]) -> Optional[int]:
+        for k in keys:
+            if k in obj and obj[k] is not None:
                 try:
-                    return int(value)
-                except (TypeError, ValueError):
+                    return int(obj[k])
+                except Exception:
                     return None
         return None
 
-    async def _get_or_create_gateway(self, db, gateway_mac: str) -> Device:
+    def _extract_str(self, obj: dict, keys: Iterable[str]) -> Optional[str]:
+        for k in keys:
+            v = obj.get(k)
+            if v:
+                return str(v).strip()
+        return None
+
+    def _iter_detections(
+        self,
+        data: Any,
+        *,
+        gateway_mac_fallback: Optional[str],
+    ) -> Tuple[Optional[str], Iterable[Tuple[str, Optional[int], dict]]]:
+        """Return (gateway_mac, detections).
+
+        detections yields tuples: (tag_mac, rssi, raw_record)
         """
-        Garante que o gateway exista como Device BLE_GATEWAY
-        e atualiza last_seen_at.
-        """
-        from app.crud import device as crud_device
 
-        mac = str(gateway_mac).strip()
-        now = datetime.utcnow()
+        gw = normalize_mac(gateway_mac_fallback)
 
-        db_device = await crud_device.get_by_mac(db, mac_address=mac)
-        if not db_device:
-            # auto-cadastro do gateway
-            dev_in = DeviceCreate(
-                floor_plan_id=None,
-                name=f"Gateway {mac}",
-                code=None,
-                type="BLE_GATEWAY",
-                mac_address=mac,
-                description="Auto-registered from MQTT",
-                pos_x=None,
-                pos_y=None,
-                last_seen_at=now,
-            )
-            db_device = await crud_device.create(db, dev_in)
-            logger.info("Auto-registered new gateway device: %s", mac)
-        else:
-            await crud_device.update(db, db_device, {"last_seen_at": now})
+        # ---------------- list (your gateway) ----------------
+        if isinstance(data, list):
+            # detect gateway mac from records if present
+            for rec in data:
+                if isinstance(rec, dict) and str(rec.get("type", "")).lower() == "gateway":
+                    gw = normalize_mac(rec.get("mac")) or gw
 
-        logger.debug(
-            "Gateway heartbeat/detection: mac=%s last_seen_at=%s",
-            mac,
-            now.isoformat(),
-        )
-        return db_device
+            def gen() -> Iterable[Tuple[str, Optional[int], dict]]:
+                for rec in data:
+                    if not isinstance(rec, dict):
+                        continue
+
+                    rtype = str(rec.get("type", "")).lower()
+                    if rtype == "gateway":
+                        continue
+
+                    # iBeacon / beacon / tag
+                    if rtype in ("ibeacon", "beacon", "tag"):
+                        tag_mac = normalize_mac(rec.get("mac") or rec.get("tag_mac"))
+                        if not tag_mac:
+                            continue
+                        rssi = self._extract_int(rec, self.RSSI_KEYS)
+                        yield tag_mac, rssi, rec
+                        continue
+
+                    # fallback: if a record has 'rssi' and 'mac', treat as detection
+                    if "rssi" in rec and (rec.get("mac") or rec.get("tag_mac")):
+                        tag_mac = normalize_mac(rec.get("mac") or rec.get("tag_mac"))
+                        if not tag_mac:
+                            continue
+                        rssi = self._extract_int(rec, self.RSSI_KEYS)
+                        yield tag_mac, rssi, rec
+
+            return gw, gen()
+
+        # ---------------- dict (legacy) ----------------
+        if isinstance(data, dict):
+            tag_mac = normalize_mac(self._extract_str(data, self.TAG_MAC_KEYS))
+            if not tag_mac:
+                return gw, []
+
+            gw = normalize_mac(self._extract_str(data, self.GATEWAY_MAC_KEYS)) or gw
+            rssi = self._extract_int(data, self.RSSI_KEYS)
+            return gw, [(tag_mac, rssi, data)]
+
+        return gw, []
 
     # ------------------------------------------------------------------
-    # Handlers de mensagem
+    # Main message handler
     # ------------------------------------------------------------------
-
-    async def _handle_gateway_heartbeat(self, topic: str, payload: bytes) -> None:
-        """
-        Auto-cadastra/atualiza Device para gateways que publicam
-        em tópicos com o prefixo configurado, e atualiza last_seen_at.
-        """
-        gateway_id = self._extract_gateway_id_from_topic(topic)
-        if not gateway_id:
-            return
-
-        async with self.session_factory() as db:
-            await self._get_or_create_gateway(db, gateway_id)
-
-    async def _handle_detection_message(self, topic: str, payload: bytes) -> None:
-        """
-        Trata mensagens de detecção (TAG vista por GATEWAY).
-
-        Regras:
-        - Se TAG não estiver cadastrada no banco -> IGNORA (cadastro manual).
-        - Garante device do gateway (auto-cadastro).
-        - Grava CollectionLog.
-        - Dispara process_detection() para engine de alertas.
-        """
-        data = _decode_payload(payload)
-        if data is None:
-            return
-
-        tag_mac = self._extract_tag_mac_from_data(data)
-        if tag_mac is None:
-            # sem tag não tem log de pessoa
-            return
-
-        gateway_mac = self._extract_gateway_mac_from_data(data, topic)
-        if gateway_mac is None:
-            logger.debug("Ignoring detection message without gateway_mac: %s", data)
-            return
-
-        rssi = self._extract_rssi_from_data(data)
-
-        async with self.session_factory() as db:
-            from app.crud import (
-                tag as crud_tag,
-                collection_log as crud_collection_log,
-            )
-
-            # TAG precisa estar cadastrada (regra de negócio)
-            db_tag = await crud_tag.get_by_mac(db, mac_address=tag_mac)
-            if not db_tag:
-                logger.debug("Ignoring detection for unknown tag MAC: %s", tag_mac)
-                return
-
-            # garante gateway e atualiza last_seen_at
-            db_device = await self._get_or_create_gateway(db, gateway_mac)
-
-            # grava log
-            raw_payload = json.dumps(data, ensure_ascii=False)
-
-            log_in = CollectionLogCreate(
-                device_id=db_device.id,
-                tag_id=db_tag.id,
-                rssi=rssi,
-                raw_payload=raw_payload,
-            )
-
-            await crud_collection_log.create(db, log_in)
-            logger.debug(
-                "Created CollectionLog via MQTT: device_id=%s tag_id=%s rssi=%s",
-                db_device.id,
-                db_tag.id,
-                rssi,
-            )
-
-            # dispara regras/eventos (webhooks, alertas, etc.)
-            await process_detection(db, db_device, db_tag)
 
     async def handle_message(self, topic: str, payload: bytes) -> None:
-        """
-        Handler geral para cada mensagem vinda do broker.
-        """
-        logger.info("MQTT message received: topic=%s payload=%s", topic, payload)
+        # asyncio-mqtt may provide a Topic object; normalize to str
+        topic = str(topic)
+        logger.info("MQTT message received: topic=%s", topic)
 
-        prefix = self.settings.MQTT_GATEWAY_TOPIC_PREFIX.rstrip("/")
-        if topic.startswith(prefix):
-            await self._handle_gateway_heartbeat(topic, payload)
+        ctx = self._parse_gateway_topic(topic)
+        if not ctx:
+            return
 
-        # tenta tratar como mensagem de detecção
-        await self._handle_detection_message(topic, payload)
+        now = datetime.utcnow()
+        data = _decode_payload(payload)
+
+        # Gateway MAC comes primarily from the topic, then from payload.
+        topic_gw = normalize_mac(ctx.gateway_id)
+
+        async with self.session_factory() as db:
+            # Resolve location if new topic format provides building/floor
+            building_id, floor_id = await self._resolve_building_floor_ids(
+                db,
+                ctx.building,
+                ctx.floor,
+            )
+
+            # Ensure gateway exists (even if payload isn't JSON)
+            from app.crud import device as crud_device
+
+            gw_mac = topic_gw
+            if not gw_mac and isinstance(data, dict):
+                gw_mac = normalize_mac(self._extract_str(data, self.GATEWAY_MAC_KEYS))
+
+            if not gw_mac:
+                # Can't do anything without identifying gateway
+                logger.warning("MQTT: could not determine gateway MAC for topic=%s", topic)
+                return
+
+            db_device = await get_or_create_gateway_by_mac(
+                db,
+                gw_mac,
+                building_id=building_id,
+                floor_id=floor_id,
+            )
+
+            # update usando a instância CRUD (não existe crud_device.device aqui)
+            await crud_device.update(db, db_device, {"last_seen_at": now})
+
+            # If we got no payload, stop here.
+            if data is None:
+                return
+
+            # Extract detections and create logs for known tags
+            gw_mac2, detections = self._iter_detections(data, gateway_mac_fallback=gw_mac)
+
+            if gw_mac2 and gw_mac2 != gw_mac:
+                # Update gateway mac if payload had a better one
+                # (rare, but harmless).
+                gw_mac = gw_mac2
+
+            if not detections:
+                return
+
+            from app.crud import collection_log as crud_collection_log
+            from app.crud import tag as crud_tag
+
+            for tag_mac, rssi, rec in detections:
+                db_tag = await crud_tag.get_by_mac(db, mac_address=tag_mac)
+                if not db_tag:
+                    logger.debug("Ignoring detection for unknown tag MAC: %s", tag_mac)
+                    continue
+
+                raw_payload = json.dumps(
+                    {
+                        "topic": topic,
+                        "tenant": ctx.tenant,
+                        "building": ctx.building,
+                        "floor": ctx.floor,
+                        "gateway_mac": gw_mac,
+                        "record": rec,
+                    },
+                    ensure_ascii=False,
+                )
+
+                log_in = CollectionLogCreate(
+                    device_id=db_device.id,
+                    tag_id=db_tag.id,
+                    rssi=rssi,
+                    raw_payload=raw_payload,
+                )
+                await crud_collection_log.create(db, log_in)
+
+                # Alert engine
+                await process_detection(db, db_device, db_tag)
 
     # ------------------------------------------------------------------
-    # Monitor de OFFLINE / ONLINE
+    # Offline / online monitor
     # ------------------------------------------------------------------
 
     async def _handle_gateway_offline(
@@ -293,10 +413,6 @@ class MqttIngestor:
         now: datetime,
         offline_seconds: int,
     ) -> None:
-        """
-        Hook chamado quando detectamos transição ONLINE -> OFFLINE
-        para um gateway.
-        """
         logger.warning(
             "Gateway OFFLINE detected: id=%s name=%s mac=%s last_seen_at=%s offline_for=%ss",
             device.id,
@@ -305,7 +421,6 @@ class MqttIngestor:
             device.last_seen_at,
             offline_seconds,
         )
-
         await fire_gateway_offline_event(
             db=db,
             device=device,
@@ -319,9 +434,6 @@ class MqttIngestor:
         device: Device,
         now: datetime,
     ) -> None:
-        """
-        Hook chamado quando detectamos transição OFFLINE -> ONLINE.
-        """
         logger.info(
             "Gateway ONLINE detected: id=%s name=%s mac=%s last_seen_at=%s",
             device.id,
@@ -329,7 +441,6 @@ class MqttIngestor:
             device.mac_address,
             device.last_seen_at,
         )
-
         await fire_gateway_online_event(
             db=db,
             device=device,
@@ -337,10 +448,6 @@ class MqttIngestor:
         )
 
     async def _offline_monitor_loop(self) -> None:
-        """
-        Loop periódico que verifica quais gateways BLE estão
-        offline/online com base em last_seen_at e DEVICE_OFFLINE_THRESHOLD_SECONDS.
-        """
         interval = self.offline_check_interval_seconds
         threshold = getattr(self.settings, "DEVICE_OFFLINE_THRESHOLD_SECONDS", 30)
 
@@ -371,12 +478,10 @@ class MqttIngestor:
 
                         prev_status = self._gateway_status_cache.get(dev.id)
 
-                        # primeira vez: só guarda, não gera evento
                         if prev_status is None:
                             self._gateway_status_cache[dev.id] = is_online
                             continue
 
-                        # ONLINE -> OFFLINE
                         if prev_status and not is_online:
                             if offline_seconds is not None:
                                 await self._handle_gateway_offline(
@@ -386,7 +491,6 @@ class MqttIngestor:
                                     offline_seconds,
                                 )
 
-                        # OFFLINE -> ONLINE
                         if (not prev_status) and is_online:
                             await self._handle_gateway_online(db, dev, now)
 
@@ -396,18 +500,14 @@ class MqttIngestor:
                 logger.exception("Error while running gateway offline monitor: %s", e)
 
     # ------------------------------------------------------------------
-    # Loop principal MQTT
+    # MQTT loop
     # ------------------------------------------------------------------
 
     async def _mqtt_loop(self) -> None:
-        """
-        Loop principal do ingestor MQTT com reconexão simples.
-        """
         host = self.settings.MQTT_HOST
         port = self.settings.MQTT_PORT
         username = self.settings.MQTT_USERNAME
         password = self.settings.MQTT_PASSWORD
-
         topic = self.settings.MQTT_TOPIC
 
         backoff = 5
@@ -442,10 +542,7 @@ class MqttIngestor:
                                     message.payload,
                                 )
                             except Exception as e:
-                                logger.exception(
-                                    "Error processing MQTT message: %s",
-                                    e,
-                                )
+                                logger.exception("Error processing MQTT message: %s", e)
 
             except MqttError as e:
                 logger.warning(
@@ -461,13 +558,6 @@ class MqttIngestor:
                 backoff = min(backoff * 2, 60)
 
     async def run(self) -> None:
-        """
-        Entry point chamado no startup da aplicação.
-
-        Roda em paralelo:
-        - loop MQTT (_mqtt_loop)
-        - monitor de offline (_offline_monitor_loop)
-        """
         tasks = []
         try:
             tasks.append(asyncio.create_task(self._mqtt_loop(), name="mqtt_loop"))
@@ -483,7 +573,6 @@ class MqttIngestor:
 
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
-            # cancelamento vindo do shutdown do FastAPI
             self._stopped = True
             for t in tasks:
                 t.cancel()
@@ -493,7 +582,4 @@ class MqttIngestor:
             self._stopped = True
 
     def stop(self) -> None:
-        """
-        Sinaliza para os loops internos pararem assim que possível.
-        """
         self._stopped = True
