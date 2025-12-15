@@ -56,12 +56,27 @@ async def signup(
     data: UserCreate,
     db: AsyncSession = Depends(get_db_session),
 ) -> UserRead:
+    # 🔐 Signup fica disponível apenas para bootstrap do primeiro admin
+    # (quando ainda não existe nenhum admin/superuser no banco).
+    has_admin = await crud_user.has_admin(db)
+    if has_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Signup desabilitado. Apenas admins podem criar usuários.",
+        )
+
     existing = await crud_user.get_by_email(db, email=data.email)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Já existe um usuário com este e-mail",
         )
+
+    # Força criação de admin/superuser no bootstrap
+    if hasattr(data, "model_copy"):
+        data = data.model_copy(update={"role": "ADMIN", "is_superuser": True})
+    else:
+        data = data.copy(update={"role": "ADMIN", "is_superuser": True})
 
     hashed_pwd = get_password_hash(data.password)
     user_obj = await crud_user.create_with_hashed_password(

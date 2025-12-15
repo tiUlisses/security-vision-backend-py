@@ -16,6 +16,8 @@ from app.api.routes import auth
 from app.api.routes import incidents
 from app.api.routes import chatwoot_webhooks as integrations_chatwoot
 from app.api.routes import support_groups
+from app.api.routes import users
+
 __all__ = [
     "buildings",
     "floors",
@@ -35,4 +37,5 @@ __all__ = [
     "incidents",
     "integrations_chatwoot",
     "support_groups",
+    "users",
 ]
