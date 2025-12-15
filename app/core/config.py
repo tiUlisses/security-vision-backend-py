@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     CHATWOOT_DEFAULT_CONTACT_IDENTIFIER: str = "security-vision-system"
     CHATWOOT_WEBHOOK_TOKEN: str | None = os.getenv("CHATWOOT_WEBHOOK_TOKEN")
     CHATWOOT_INCIDENT_BASE_URL: AnyHttpUrl | None = None
-
+    POSITION_STALE_THRESHOLD_SECONDS: int = 15
     # ==================================================================
 
     # Config Pydantic v2
