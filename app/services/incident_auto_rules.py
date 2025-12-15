@@ -1,6 +1,6 @@
 # app/services/incident_auto_rules.py
 from __future__ import annotations
-
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, TYPE_CHECKING
 from app.services.chatwoot_client import ChatwootClient
@@ -28,86 +28,76 @@ if TYPE_CHECKING:
 
 
 chatwoot_client = ChatwootClient()
+logger = logging.getLogger(__name__)
 
 async def apply_incident_rules_for_event(
     db: AsyncSession,
     *,
     event: "DeviceEvent",
 ) -> List["Incident"]:
-    """
-    Avalia as regras de incidente para um DeviceEvent de câmera e,
-    se houver regra compatível, cria automaticamente incidentes
-    + mensagens (SYSTEM + MEDIA a partir do snapshot da câmera).
-    """
-
-    print(f"[incident_rules] Avaliando regras para DeviceEvent id={event.id}, analytic_type={event.analytic_type}, device_id={event.device_id}")
-
-    # 0) Se já existe incidente ligado a esse evento, não faz nada
-    existing = await crud_incident.get_by_device_event(
-        db,
-        device_event_id=event.id,
+    logger.info(
+        "[incident_rules] avaliando regras para DeviceEvent id=%s analytic_type=%s device_id=%s",
+        event.id,
+        event.analytic_type,
+        event.device_id,
     )
+
+    existing = await crud_incident.get_by_device_event(db, device_event_id=event.id)
     if existing:
-        print(f"[incident_rules] Já existe incidente para device_event_id={event.id} (incident_id={existing.id}), não vou criar outro.")
+        logger.info(
+            "[incident_rules] já existe incidente para device_event_id=%s (incident_id=%s)",
+            event.id,
+            existing.id,
+        )
         return []
 
-    # 1) garante que o device existe
     device = await crud_device.get(db, id=event.device_id)
     if not device:
-        print(f"[incident_rules] Device id={event.device_id} não encontrado, abortando.")
+        logger.warning("[incident_rules] device id=%s não encontrado, abortando.", event.device_id)
         return []
 
-    # 2) Busca regras compatíveis com ESTE evento (seu CRUD atual)
     rules = await crud_incident_rule.list_matching_event(db, event=event)
-    print(f"[incident_rules] Encontradas {len(rules)} regras compatíveis para o evento {event.id}.")
+    logger.info("[incident_rules] encontradas %s regras compatíveis para evento %s", len(rules), event.id)
     if not rules:
         return []
 
     payload = event.payload or {}
-    tenant_from_event = None
-    if isinstance(payload, dict):
-        tenant_from_event = payload.get("tenant")
+    tenant_from_event = payload.get("tenant") if isinstance(payload, dict) else None
 
     incidents: List["Incident"] = []
 
     for rule in rules:
-        print(
-            f"[incident_rules] Aplicando regra id={rule.id}, "
-            f"name='{rule.name}' ao evento {event.id}"
-        )
-
-        # 🔹 Pega o group_id de forma segura (não quebra se o atributo não existir)
         group_id = getattr(rule, "assigned_group_id", None)
-        print(f"[incident_rules] rule.id={rule.id} assigned_group_id={group_id}")
+        logger.info("[incident_rules] regra id=%s name=%r assigned_group_id=%r", rule.id, rule.name, group_id)
 
         severity = (rule.severity or "MEDIUM").upper()
         kind = infer_incident_kind_from_event(event)
 
-        # ----------------------------
-        # SLA: se a regra tiver grupo, tenta usar o default_sla_minutes do grupo
-        # ----------------------------
         now = datetime.now(timezone.utc)
-        group_default_sla: int | None = None
 
+        # Se tiver grupo, pegamos o SupportGroup (e aproveitamos SLA default)
+        sg = None
+        group_default_sla: int | None = None
         if group_id:
             sg = await crud_support_group.get(db, id=group_id)
             if sg:
-                print(
-                    f"[incident_rules] Suporte group id={group_id} "
-                    f"default_sla_minutes={sg.default_sla_minutes}"
+                group_default_sla = sg.default_sla_minutes or None
+                logger.info(
+                    "[incident_rules] support_group id=%s name=%r default_sla_minutes=%r",
+                    sg.id,
+                    getattr(sg, "name", None),
+                    sg.default_sla_minutes,
                 )
-                if sg.default_sla_minutes:
-                    group_default_sla = sg.default_sla_minutes
+            else:
+                logger.warning("[incident_rules] support_group id=%s não encontrado", group_id)
 
         sla_minutes, due_at = compute_sla_fields(
             severity=severity,
-            sla_minutes=group_default_sla,  # se None, cai no default global por severidade
+            sla_minutes=group_default_sla,
             now=now,
         )
 
         camera_name = getattr(device, "name", None) or f"CAM {device.id}"
-
-        # ---------- título / descrição com templates ----------
 
         ctx: Dict[str, Any] = {
             "analytic_type": event.analytic_type,
@@ -125,15 +115,15 @@ async def apply_incident_rules_for_event(
             except Exception:
                 return default
 
-        default_title = f"[AUTO] {event.analytic_type} na câmera {camera_name}"
-        title = render(rule.title_template, default_title)
-
-        default_description = (
-            f"Incidente criado automaticamente pela regra '{rule.name}' "
-            f"ao receber o evento {event.id} ({event.analytic_type}) "
-            f"da câmera {camera_name}."
+        title = render(rule.title_template, f"[AUTO] {event.analytic_type} na câmera {camera_name}")
+        description = render(
+            rule.description_template,
+            (
+                f"Incidente criado automaticamente pela regra '{rule.name}' "
+                f"ao receber o evento {event.id} ({event.analytic_type}) "
+                f"da câmera {camera_name}."
+            ),
         )
-        description = render(rule.description_template, default_description)
 
         data = {
             "device_id": event.device_id,
@@ -146,54 +136,69 @@ async def apply_incident_rules_for_event(
             "description": description,
             "sla_minutes": sla_minutes,
             "due_at": due_at,
-            # atribuição automática
             "assigned_to_user_id": rule.assigned_to_user_id,
         }
 
-        # Só adiciona se realmente tiver grupo
         if group_id:
             data["assigned_group_id"] = group_id
 
-        # remove chaves com None
         data = {k: v for k, v in data.items() if v is not None}
 
         incident = await crud_incident.create(db, obj_in=data)
-        incidents.append(incident)
-            # 🔹 Dispara notificação inicial / criação da conversa no Chatwoot
+        if group_id:
+            sg = await crud_support_group.get(db, id=group_id)
+            if sg:
+                incident.assigned_group = sg  # atribui em memória pra roteamento
+
+        # agora sim notifica
         try:
-            cw = ChatwootClient()
-            await cw.send_incident_notification(
+            await chatwoot_client.send_incident_notification(
                 incident=incident,
-                incident_url=f"incident:{incident.id}",
+                incident_url=f"{settings.CHATWOOT_INCIDENT_BASE_URL.rstrip('/')}/{incident.id}" if settings.CHATWOOT_INCIDENT_BASE_URL else None,
             )
         except Exception as exc:
-            print(
-                f"[chatwoot] erro ao enviar notificação para incidente "
-                f"{incident.id}: {exc}"
-            )
+            logger.exception("[chatwoot] erro ao enviar notificação incidente %s: %s", incident.id, exc)
+        incidents.append(incident)
+
+        # ✅ CRÍTICO: garantir que o Chatwoot consiga resolver inbox/time do grupo
+        # ChatwootClient usa incident.assigned_group (obj), então “injetamos” o sg quando existir.
+        if sg is not None:
+            try:
+                incident.assigned_group = sg  # type: ignore[attr-defined]
+            except Exception:
+                # best-effort
+                pass
+
+        # ✅ garante conversa no Chatwoot + persiste conversation_id no incidente
+        if chatwoot_client.is_configured():
+            try:
+                conv_id = await chatwoot_client.send_incident_notification(incident=incident)
+                if conv_id and conv_id != getattr(incident, "chatwoot_conversation_id", None):
+                    incident = await crud_incident.update(
+                        db,
+                        db_obj=incident,
+                        obj_in={"chatwoot_conversation_id": conv_id},
+                    )
+                    # mantém em memória também (evita re-enviar resumo)
+                    try:
+                        incident.chatwoot_conversation_id = conv_id  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception("[chatwoot] erro ao enviar notificação para incidente %s", incident.id)
 
         # ------------------------
-        # Mensagem SYSTEM de contexto
+        # SYSTEM (contexto) + envia pro Chatwoot
         # ------------------------
         lines: list[str] = []
-
         lines.append(
             f"Incidente criado automaticamente pela regra **{rule.name}** "
-            f"para o evento **{event.analytic_type}** na câmera "
-            f"**{camera_name}**."
+            f"para o evento **{event.analytic_type}** na câmera **{camera_name}**."
         )
 
-        ts_raw = (
-            payload.get("Timestamp")
-            or payload.get("timestamp")
-            or event.occurred_at
-            or event.created_at
-        )
+        ts_raw = payload.get("Timestamp") or payload.get("timestamp") or event.occurred_at or event.created_at
         if ts_raw:
-            if isinstance(ts_raw, str):
-                ts_str = ts_raw
-            else:
-                ts_str = ts_raw.isoformat()
+            ts_str = ts_raw if isinstance(ts_raw, str) else ts_raw.isoformat()
             lines.append(f"Horário do evento: {ts_str}.")
 
         building = payload.get("Building")
@@ -213,35 +218,35 @@ async def apply_incident_rules_for_event(
         if ff_name:
             lines.append(f"Pessoa reconhecida: **{ff_name}**.")
             if isinstance(ff_confidence, (int, float)):
-                lines.append(
-                    f"Confiança do match: {(ff_confidence * 100):.1f}%."
-                )
+                lines.append(f"Confiança do match: {(ff_confidence * 100):.1f}%.")
 
         lines.append(f"Severidade: **{severity}**. Status inicial: **OPEN**.")
 
         if group_id:
-            lines.append(
-                "Incidente atribuído automaticamente ao grupo de atendimento "
-                "configurado na regra."
-            )
+            lines.append("Incidente atribuído automaticamente ao grupo configurado na regra.")
         elif rule.assigned_to_user_id:
-            lines.append(
-                "Incidente atribuído automaticamente ao operador configurado na regra."
-            )
+            lines.append("Incidente atribuído automaticamente ao operador configurado na regra.")
 
-        system_msg_data = {
-            "incident_id": incident.id,
-            "message_type": "SYSTEM",
-            "content": "\n".join(lines),
-            "author_name": "Sistema (regra de incidente)",
-        }
-        await crud_incident_message.create(db, obj_in=system_msg_data)
+        system_msg = await crud_incident_message.create(
+            db,
+            obj_in={
+                "incident_id": incident.id,
+                "message_type": "SYSTEM",
+                "content": "\n".join(lines),
+                "author_name": "Sistema (regra de incidente)",
+            },
+        )
+
+        if chatwoot_client.is_configured():
+            try:
+                await chatwoot_client.send_incident_timeline_message(incident, system_msg)
+            except Exception:
+                logger.exception("[chatwoot] erro ao enviar SYSTEM incidente=%s msg=%s", incident.id, system_msg.id)
 
         # ------------------------
-        # Mídias (snapshot, face cadastrada, etc.)
+        # MEDIA (snapshot, face etc.) + envia pro Chatwoot
         # ------------------------
         media_descriptors = extract_media_from_event(event)
-        # esperado: [{"source_url": "...", "filename_hint": "...", "label": "..."}]
 
         for media in media_descriptors:
             url = media.get("source_url")
@@ -254,23 +259,37 @@ async def apply_incident_rules_for_event(
                     url=url,
                     filename_hint=media.get("filename_hint"),
                 )
-            except Exception as exc:
-                print(
-                    f"[incident-rules] Falha ao baixar mídia '{url}' "
-                    f"para incidente {incident.id}: {exc}"
+            except Exception:
+                logger.exception(
+                    "[incident_rules] falha ao baixar mídia url=%r incidente=%s",
+                    url,
+                    incident.id,
                 )
                 continue
 
-            msg_data = {
-                "incident_id": incident.id,
-                "message_type": "MEDIA",
-                "media_type": media_type or "IMAGE",
-                "media_url": media_url,
-                "media_thumb_url": None,
-                "media_name": original_name,
-                "content": media.get("label"),
-                "author_name": "Sistema (regra de incidente)",
-            }
-            await crud_incident_message.create(db, obj_in=msg_data)
+            media_msg = await crud_incident_message.create(
+                db,
+                obj_in={
+                    "incident_id": incident.id,
+                    "message_type": "MEDIA",
+                    "media_type": media_type or "IMAGE",
+                    "media_url": media_url,
+                    "media_thumb_url": None,
+                    "media_name": original_name,
+                    "content": media.get("label"),
+                    "author_name": "Sistema (regra de incidente)",
+                },
+            )
+
+            if chatwoot_client.is_configured():
+                try:
+                    await chatwoot_client.send_incident_timeline_message(incident, media_msg)
+                except Exception:
+                    logger.exception(
+                        "[chatwoot] erro ao enviar MEDIA incidente=%s msg=%s url=%r",
+                        incident.id,
+                        media_msg.id,
+                        media_url,
+                    )
 
     return incidents
