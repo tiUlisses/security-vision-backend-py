@@ -1,9 +1,11 @@
 # app/services/alert_engine.py
 
+from __future__ import annotations
+
 import json
 import logging
-from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Tuple, Dict, Any
 
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,20 +23,180 @@ from app.models.floor import Floor
 from app.models.building import Building
 from app.models.person_group import person_group_memberships
 from app.services.webhook_dispatcher import dispatch_webhooks
+from app.core.config import settings
 
 logger = logging.getLogger("rtls.alert_engine")
 
+# Tipos de regras RTLS
 FORBIDDEN_SECTOR = "FORBIDDEN_SECTOR"
 DWELL_TIME = "DWELL_TIME"
 
+# Eventos sistêmicos
 GATEWAY_OFFLINE = "GATEWAY_OFFLINE"
 GATEWAY_ONLINE = "GATEWAY_ONLINE"
+
+RTLS_SESSION_EVENT_TYPES = (FORBIDDEN_SECTOR, DWELL_TIME)
+
+
+# ---------------------------------------------------------------------------
+# Utilitários
+# ---------------------------------------------------------------------------
+
+def _ensure_utc(dt: datetime | None) -> datetime:
+    """
+    Garante datetime timezone-aware em UTC.
+    """
+    now = datetime.now(timezone.utc)
+    if dt is None:
+        return now
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _dt_iso(dt: datetime | None) -> Optional[str]:
+    return _ensure_utc(dt).isoformat() if dt is not None else None
+
+
+def _safe_json_load(s: str | None) -> Dict[str, Any]:
+    if not s:
+        return {}
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _safe_json_dump(d: Dict[str, Any]) -> str:
+    return json.dumps(d, ensure_ascii=False)
+
+
+def _get_session_ttl_seconds() -> int:
+    """
+    TTL para encerrar sessões RTLS quando não há novas evidências.
+
+    - settings.ALERT_SESSION_TTL_SECONDS (se existir)
+    - fallback: settings.POSITION_STALE_THRESHOLD_SECONDS * 2
+    - fallback final: 60s
+    """
+    ttl = getattr(settings, "ALERT_SESSION_TTL_SECONDS", None)
+    if isinstance(ttl, int) and ttl >= 0:
+        return ttl
+
+    pos_ttl = getattr(settings, "POSITION_STALE_THRESHOLD_SECONDS", None)
+    if isinstance(pos_ttl, int) and pos_ttl > 0:
+        return int(pos_ttl) * 2
+
+    return 60
+
+
+async def _close_event_session(
+    db: AsyncSession,
+    *,
+    event: AlertEvent,
+    reason: str,
+) -> AlertEvent:
+    """
+    Fecha uma sessão de alerta RTLS, usando ended_at = last_seen_at (última evidência real).
+    Atualiza payload com ended_at/is_open/duration e dispara webhook.
+    """
+    if not getattr(event, "is_open", False):
+        return event
+
+    last_seen = _ensure_utc(getattr(event, "last_seen_at", None))
+    started = _ensure_utc(getattr(event, "started_at", None))
+    ended_at = last_seen
+
+    payload = _safe_json_load(getattr(event, "payload", None))
+    payload.update(
+        {
+            "is_open": False,
+            "ended_at": ended_at.isoformat(),
+            "last_seen_at": last_seen.isoformat(),
+            "started_at": started.isoformat(),
+            "duration_seconds": max(0, (ended_at - started).total_seconds()),
+            "close_reason": reason,
+        }
+    )
+
+    updated = await crud_alert_event.update(
+        db,
+        event,
+        {
+            "is_open": False,
+            "ended_at": ended_at,
+            "payload": _safe_json_dump(payload),
+        },
+    )
+
+    # Dispara webhook de update/fechamento
+    try:
+        await dispatch_webhooks(db, updated)
+    except Exception:
+        logger.exception("Failed to dispatch webhook on alert close (event_id=%s)", updated.id)
+
+    return updated
+
+
+async def close_stale_rtls_sessions(
+    db: AsyncSession,
+    *,
+    now: datetime | None = None,
+    ttl_seconds: int | None = None,
+    tag_id: int | None = None,
+    device_id: int | None = None,
+) -> int:
+    """
+    ETAPA 2: Fecha sessões RTLS (FORBIDDEN_SECTOR / DWELL_TIME) que ficaram "stale".
+
+    Encerramento:
+      - is_open=False
+      - ended_at = last_seen_at (última evidência)
+      - payload enriquecido
+
+    Pode ser chamado:
+      - oportunisticamente em process_detection (para reentradas)
+      - periodicamente por algum loop do sistema (recomendado)
+    """
+    now = _ensure_utc(now)
+    ttl = _get_session_ttl_seconds() if ttl_seconds is None else int(ttl_seconds)
+
+    # ttl=0 -> desabilita fechamento automático por tempo
+    if ttl <= 0:
+        return 0
+
+    cutoff = now - timedelta(seconds=ttl)
+
+    stmt = select(AlertEvent).where(
+        AlertEvent.is_open.is_(True),
+        AlertEvent.event_type.in_(RTLS_SESSION_EVENT_TYPES),
+        AlertEvent.last_seen_at < cutoff,
+    )
+
+    if tag_id is not None:
+        stmt = stmt.where(AlertEvent.tag_id == tag_id)
+
+    if device_id is not None:
+        stmt = stmt.where(AlertEvent.device_id == device_id)
+
+    res = await db.execute(stmt)
+    events = list(res.scalars().all())
+
+    closed = 0
+    for ev in events:
+        await _close_event_session(db, event=ev, reason=f"stale_ttl_{ttl}s")
+        closed += 1
+
+    if closed:
+        logger.info("Closed %s stale RTLS sessions (ttl=%ss cutoff=%s)", closed, ttl, cutoff.isoformat())
+
+    return closed
 
 
 # ---------------------------------------------------------------------------
 # Helpers de consulta (SEM lazy loading)
 # ---------------------------------------------------------------------------
-
 
 async def _get_person_with_groups(
     db: AsyncSession,
@@ -42,23 +204,19 @@ async def _get_person_with_groups(
     tag: Tag,
 ) -> Tuple[Optional[Person], List[int]]:
     """
-    Carrega a pessoa associada à TAG (via tag.person_id) e
-    os IDs dos grupos dessa pessoa.
-
-    NUNCA usa tag.person ou person.groups (evita lazy-load e MissingGreenlet).
+    Carrega a pessoa associada à TAG e os IDs dos grupos dessa pessoa,
+    sem lazy-load.
     """
     person_id = getattr(tag, "person_id", None)
     if not person_id:
         return None, []
 
-    # 1) Carrega a pessoa explicitamente
     stmt_person = select(Person).where(Person.id == person_id)
     res_person = await db.execute(stmt_person)
     person = res_person.scalars().first()
     if not person:
         return None, []
 
-    # 2) Carrega somente os IDs dos grupos via tabela de associação
     stmt_groups = select(person_group_memberships.c.group_id).where(
         person_group_memberships.c.person_id == person.id
     )
@@ -74,16 +232,16 @@ async def _get_location_info(
     device: Device,
 ) -> dict:
     """
-    Retorna informações de localização a partir de device.floor_plan_id,
-    SEM usar device.floor_plan (lazy).
-
-    Retorna um dict com IDs e nomes de planta, andar e prédio.
+    Retorna informações de localização sem lazy-load.
+    Prioridade:
+      1) floor_plan_id -> FloorPlan -> Floor -> Building
+      2) floor_id -> Floor -> Building
+      3) building_id -> Building
     """
     floor_plan_id = getattr(device, "floor_plan_id", None)
     floor_id = getattr(device, "floor_id", None)
     building_id = getattr(device, "building_id", None)
 
-    # 1) Se tiver planta, é a fonte de verdade (mantém comportamento antigo)
     if floor_plan_id:
         stmt = (
             select(
@@ -122,7 +280,6 @@ async def _get_location_info(
             "building_name": bld_name,
         }
 
-    # 2) Sem planta: usa building_id / floor_id vindos do MQTT (gateways)
     if floor_id:
         stmt = (
             select(
@@ -163,7 +320,6 @@ async def _get_location_info(
                 "building_name": bld_name,
             }
 
-    # 3) Sem info
     return {
         "floor_plan_id": None,
         "floor_plan_name": None,
@@ -181,8 +337,8 @@ async def _load_applicable_rules(
     group_ids: List[int],
 ) -> List[AlertRule]:
     """
-    Carrega regras ativas para o device, filtrando por:
-      - tipo (FORBIDDEN_SECTOR, DWELL_TIME)
+    Regras ativas para o device, filtradas por:
+      - rule_type (FORBIDDEN_SECTOR, DWELL_TIME)
       - group_id IN grupos da pessoa OU group_id IS NULL (regra geral)
     """
     stmt = select(AlertRule).where(
@@ -199,7 +355,6 @@ async def _load_applicable_rules(
             )
         )
     else:
-        # Pessoa sem grupo -> só pega regras "gerais" (group_id = NULL)
         stmt = stmt.where(AlertRule.group_id.is_(None))
 
     result = await db.execute(stmt)
@@ -215,9 +370,8 @@ async def _load_applicable_rules(
 
 
 # ---------------------------------------------------------------------------
-# Disparos de eventos
+# Disparos RTLS (sessões)
 # ---------------------------------------------------------------------------
-
 
 async def _fire_forbidden_sector(
     db: AsyncSession,
@@ -227,51 +381,32 @@ async def _fire_forbidden_sector(
     tag: Tag,
     person: Optional[Person],
     now: datetime,
+    collection_log_id: int | None = None,
 ) -> None:
     """
     FORBIDDEN_SECTOR como sessão:
 
-    - Quando a pessoa entra em um gateway proibido:
-        cria um AlertEvent com started_at = now, last_seen_at = now,
-        ended_at = None, is_open = True.
-
-    - Enquanto ela continuar nesse mesmo gateway proibido:
-        não cria novo evento, apenas atualiza last_seen_at.
-
-    - Quando ela aparecer em OUTRO gateway:
-        fecha qualquer evento FORBIDDEN_SECTOR aberto dessa TAG
-        (is_open = False, ended_at = now).
+    - Entrada: cria AlertEvent (is_open=True)
+    - Continua no mesmo gateway: atualiza last_seen_at e last_collection_log_id
+    - Saída (apareceu em outro gateway/regra): fecha eventos abertos dessa TAG
+      com ended_at = last_seen_at (última evidência dentro do setor)
     """
+    now = _ensure_utc(now)
 
-    # Enriquecimento de localização (sem lazy load)
-    location = await _get_location_info(db, device=device)
-
-    # 1) Fecha eventos abertos FORBIDDEN_SECTOR dessa TAG em outros devices/regras
-    stmt_open = (
-        select(AlertEvent)
-        .where(
-            AlertEvent.event_type == FORBIDDEN_SECTOR,
-            AlertEvent.tag_id == tag.id,
-            AlertEvent.is_open.is_(True),
-        )
+    # 1) Fecha quaisquer sessões FORBIDDEN_SECTOR abertas dessa TAG (em outros devices/regras)
+    stmt_open = select(AlertEvent).where(
+        AlertEvent.event_type == FORBIDDEN_SECTOR,
+        AlertEvent.tag_id == tag.id,
+        AlertEvent.is_open.is_(True),
     )
     res_open = await db.execute(stmt_open)
     open_events = res_open.scalars().all()
 
     for ev in open_events:
-        # Se for outro device ou outra regra, consideramos que a sessão anterior acabou
         if ev.device_id != device.id or ev.rule_id != rule.id:
-            await crud_alert_event.update(
-                db,
-                ev,
-                {
-                    "is_open": False,
-                    "ended_at": now,
-                    "last_seen_at": now,
-                },
-            )
+            await _close_event_session(db, event=ev, reason="moved_to_other_device_or_rule")
 
-    # 2) Verifica se já existe sessão aberta para (regra, tag, device)
+    # 2) Procura sessão aberta para (regra, tag, device)
     stmt_existing = (
         select(AlertEvent)
         .where(
@@ -288,22 +423,36 @@ async def _fire_forbidden_sector(
     existing = res_existing.scalar_one_or_none()
 
     if existing:
-        # Ainda está no mesmo setor proibido:
-        # só atualiza last_seen_at (não cria novo evento)
-        await crud_alert_event.update(
+        # Atualiza "evidência" e last_seen_at
+        payload = _safe_json_load(getattr(existing, "payload", None))
+        payload.update(
+            {
+                "last_seen_at": now.isoformat(),
+                "last_collection_log_id": collection_log_id,
+            }
+        )
+        updated = await crud_alert_event.update(
             db,
             existing,
-            {"last_seen_at": now},
+            {
+                "last_seen_at": now,
+                "last_collection_log_id": collection_log_id,
+                "payload": _safe_json_dump(payload),
+            },
         )
+        # opcional: webhook a cada atualização (pode ser útil no front)
+        try:
+            await dispatch_webhooks(db, updated)
+        except Exception:
+            logger.exception("Failed to dispatch webhook on forbidden update (event_id=%s)", updated.id)
         return
 
-    # 3) Não havia sessão aberta -> entrada em área proibida
+    # 3) Não havia sessão -> cria evento (entrada)
+    location = await _get_location_info(db, device=device)
+
+    person_name = None
     if person is not None:
-        person_name = getattr(person, "full_name", None) or getattr(
-            person, "name", None
-        )
-    else:
-        person_name = None
+        person_name = getattr(person, "full_name", None) or getattr(person, "name", None)
 
     base_name = (
         person_name
@@ -320,8 +469,6 @@ async def _fire_forbidden_sector(
 
     message = f"Entrada em setor proibido: {base_name} no gateway '{device_label}'."
 
-    # Payload JSON (livre, para debug / relatórios)
-    # 🔹 AGORA COM CAMPOS PLANOS, ALINHADOS COM O FRONT E WEBHOOKS
     payload_dict = {
         "rule_id": rule.id,
         "rule_name": rule.name,
@@ -343,9 +490,10 @@ async def _fire_forbidden_sector(
         "ended_at": None,
         "is_open": True,
         "message": message,
+        "first_collection_log_id": collection_log_id,
+        "last_collection_log_id": collection_log_id,
     }
 
-    # Usa Pydantic para garantir tipos corretos (datetime, bool, etc.)
     event_in = AlertEventCreate(
         rule_id=rule.id,
         event_type=FORBIDDEN_SECTOR,
@@ -361,12 +509,12 @@ async def _fire_forbidden_sector(
         ended_at=None,
         is_open=True,
         message=message,
-        payload=json.dumps(payload_dict, ensure_ascii=False),
+        payload=_safe_json_dump(payload_dict),
+        first_collection_log_id=collection_log_id,
+        last_collection_log_id=collection_log_id,
     )
 
     new_event = await crud_alert_event.create(db, event_in)
-
-    # 🔔 dispara webhooks para FORBIDDEN_SECTOR
     await dispatch_webhooks(db, new_event)
 
 
@@ -378,20 +526,34 @@ async def _fire_dwell_time(
     tag: Tag,
     person: Optional[Person],
     now: datetime,
+    collection_log_id: int | None = None,
 ) -> None:
     """
-    Regra de permanência (DWELL_TIME):
+    DWELL_TIME como sessão:
 
-    - Abre uma sessão de alerta por (regra, tag, device).
-    - started_at = primeira vez que a TAG foi vista nesse contexto.
-    - last_seen_at é atualizado a cada detecção.
-    - message só é preenchida quando o tempo de permanência >= max_dwell_seconds.
+    - Abre uma sessão por (regra, tag, device)
+    - started_at = primeira evidência no device
+    - last_seen_at atualizado por evidência
+    - message passa a existir quando dwell_seconds >= max_dwell_seconds (se configurado)
+    - Fecha sessões anteriores (DWELL_TIME) dessa TAG quando ela aparece em outro gateway/regra
+      com ended_at = last_seen_at
     """
+    now = _ensure_utc(now)
 
-    # ------------------------------------------------------------------
-    # 1) Procura se já existe uma sessão aberta DWELL_TIME
-    #    (regra, tag, device, is_open = True)
-    # ------------------------------------------------------------------
+    # Fecha sessões DWELL_TIME abertas dessa TAG em outros devices/regras
+    stmt_open = select(AlertEvent).where(
+        AlertEvent.event_type == DWELL_TIME,
+        AlertEvent.tag_id == tag.id,
+        AlertEvent.is_open.is_(True),
+    )
+    res_open = await db.execute(stmt_open)
+    open_events = res_open.scalars().all()
+
+    for ev in open_events:
+        if ev.device_id != device.id or ev.rule_id != rule.id:
+            await _close_event_session(db, event=ev, reason="moved_to_other_device_or_rule")
+
+    # Sessão atual (regra/tag/device)
     stmt = (
         select(AlertEvent)
         .where(
@@ -402,23 +564,17 @@ async def _fire_dwell_time(
             AlertEvent.is_open.is_(True),
         )
         .order_by(AlertEvent.started_at.asc())
+        .limit(1)
     )
     result = await db.execute(stmt)
     event = result.scalars().first()
 
-    # ------------------------------------------------------------------
-    # 2) Se NÃO existe sessão -> cria uma nova
-    # ------------------------------------------------------------------
     if event is None:
-        # Enriquecimento de localização na criação
         location = await _get_location_info(db, device=device)
 
-        # Nome da pessoa / tag
         person_name = None
         if person is not None:
-            person_name = getattr(person, "full_name", None) or getattr(
-                person, "name", None
-            )
+            person_name = getattr(person, "full_name", None) or getattr(person, "name", None)
 
         device_name = getattr(device, "name", None) or f"Device {device.id}"
 
@@ -439,6 +595,10 @@ async def _fire_dwell_time(
             "building_id": location["building_id"],
             "building_name": location["building_name"],
             "started_at": now.isoformat(),
+            "last_seen_at": now.isoformat(),
+            "is_open": True,
+            "first_collection_log_id": collection_log_id,
+            "last_collection_log_id": collection_log_id,
         }
 
         event_in = AlertEventCreate(
@@ -455,26 +615,28 @@ async def _fire_dwell_time(
             last_seen_at=now,
             ended_at=None,
             is_open=True,
-            message=None,  # ainda não atingiu o limite
-            payload=json.dumps(payload_dict, ensure_ascii=False),
+            message=None,
+            payload=_safe_json_dump(payload_dict),
+            first_collection_log_id=collection_log_id,
+            last_collection_log_id=collection_log_id,
         )
 
-        await crud_alert_event.create(db, event_in)
+        created = await crud_alert_event.create(db, event_in)
+        # webhook opcional no create
+        try:
+            await dispatch_webhooks(db, created)
+        except Exception:
+            logger.exception("Failed to dispatch webhook on dwell create (event_id=%s)", created.id)
         return
 
-    # ------------------------------------------------------------------
-    # 3) Se JÁ existe sessão -> atualiza last_seen + mensagem/payload
-    # ------------------------------------------------------------------
-    dwell_seconds = (now - event.started_at).total_seconds()
+    started_at = _ensure_utc(getattr(event, "started_at", None))
+    dwell_seconds = (now - started_at).total_seconds()
 
-    # Enriquecimento de localização e nomes para o payload
     location = await _get_location_info(db, device=device)
 
     person_name = None
     if person is not None:
-        person_name = getattr(person, "full_name", None) or getattr(
-            person, "name", None
-        )
+        person_name = getattr(person, "full_name", None) or getattr(person, "name", None)
 
     base_name = (
         person_name
@@ -491,27 +653,31 @@ async def _fire_dwell_time(
             f"{device_name} (limite {rule.max_dwell_seconds}s)."
         )
 
-    payload_dict = {
-        "rule_id": rule.id,
-        "rule_name": rule.name,
-        "event_type": DWELL_TIME,
-        "device_id": device.id,
-        "device_name": device_name,
-        "tag_id": tag.id,
-        "person_id": person.id if person else None,
-        "person_full_name": person_name,
-        "max_dwell_seconds": rule.max_dwell_seconds,
-        "dwell_seconds": dwell_seconds,
-        "floor_plan_id": location["floor_plan_id"],
-        "floor_plan_name": location["floor_plan_name"],
-        "floor_id": location["floor_id"],
-        "floor_name": location["floor_name"],
-        "building_id": location["building_id"],
-        "building_name": location["building_name"],
-        "started_at": event.started_at.isoformat(),
-        "last_seen_at": now.isoformat(),
-        "message": message,
-    }
+    payload_dict = _safe_json_load(getattr(event, "payload", None))
+    payload_dict.update(
+        {
+            "rule_id": rule.id,
+            "rule_name": rule.name,
+            "event_type": DWELL_TIME,
+            "device_id": device.id,
+            "device_name": device_name,
+            "tag_id": tag.id,
+            "person_id": person.id if person else None,
+            "person_full_name": person_name,
+            "max_dwell_seconds": rule.max_dwell_seconds,
+            "dwell_seconds": dwell_seconds,
+            "floor_plan_id": location["floor_plan_id"],
+            "floor_plan_name": location["floor_plan_name"],
+            "floor_id": location["floor_id"],
+            "floor_name": location["floor_name"],
+            "building_id": location["building_id"],
+            "building_name": location["building_name"],
+            "started_at": started_at.isoformat(),
+            "last_seen_at": now.isoformat(),
+            "message": message,
+            "last_collection_log_id": collection_log_id,
+        }
+    )
 
     updated_event = await crud_alert_event.update(
         db,
@@ -519,26 +685,98 @@ async def _fire_dwell_time(
         {
             "last_seen_at": now,
             "message": message,
-            "payload": json.dumps(payload_dict, ensure_ascii=False),
+            "payload": _safe_json_dump(payload_dict),
+            "last_collection_log_id": collection_log_id,
         },
     )
 
     logger.info(
-        "AlertEngine: DWELL_TIME fired (rule_id=%s person_id=%s device_id=%s dwell=%.1fs)",
+        "AlertEngine: DWELL_TIME update (rule_id=%s person_id=%s device_id=%s dwell=%.1fs)",
         rule.id,
         person.id if person else None,
         device.id,
         dwell_seconds,
     )
 
-    # Aqui você decide a estratégia:
-    # - Se quiser webhook só quando ultrapassar o limite, cheque `if message is not None:`
-    # - Se quiser sempre atualizar o front, manda sempre:
-    await dispatch_webhooks(db, updated_event)
+    # Você pode trocar a estratégia aqui se quiser:
+    # - webhook só quando ultrapassar (se message não era None antes)
+    # - ou sempre (como está)
+    try:
+        await dispatch_webhooks(db, updated_event)
+    except Exception:
+        logger.exception("Failed to dispatch webhook on dwell update (event_id=%s)", updated_event.id)
 
 
 # ---------------------------------------------------------------------------
 # Função principal - chamada pelo MQTT ingestor / collection_logs
+# ---------------------------------------------------------------------------
+
+async def process_detection(
+    db: AsyncSession,
+    device: Device,
+    tag: Tag,
+    *,
+    collection_log_id: int | None = None,
+    seen_at: datetime | None = None,
+) -> None:
+    """
+    Chamado a cada detecção.
+
+    Agora recebe:
+      - collection_log_id: evidência do log que gerou a detecção
+      - seen_at: timestamp do log (recomendado usar created_at do CollectionLog)
+
+    Passos:
+      1) Fecha sessões stale dessa TAG (Etapa 2, reentrada limpa)
+      2) Carrega pessoa + grupos (sem lazy-load)
+      3) Carrega regras aplicáveis
+      4) Dispara FORBIDDEN_SECTOR / DWELL_TIME
+    """
+    now = _ensure_utc(seen_at)
+
+    # ETAPA 2 (opportunistic): fecha sessões stale para esta TAG
+    # Isso garante que, se a TAG "sumiu" e voltou, não reutilizamos sessão antiga.
+    try:
+        await close_stale_rtls_sessions(db, now=now, tag_id=tag.id)
+    except Exception:
+        logger.exception("Failed to close stale RTLS sessions for tag_id=%s", tag.id)
+
+    person, group_ids = await _get_person_with_groups(db, tag=tag)
+
+    rules = await _load_applicable_rules(
+        db,
+        device_id=device.id,
+        group_ids=group_ids,
+    )
+    if not rules:
+        return
+
+    for rule in rules:
+        if rule.rule_type == FORBIDDEN_SECTOR:
+            await _fire_forbidden_sector(
+                db=db,
+                rule=rule,
+                device=device,
+                tag=tag,
+                person=person,
+                now=now,
+                collection_log_id=collection_log_id,
+            )
+        elif rule.rule_type == DWELL_TIME:
+            await _fire_dwell_time(
+                db=db,
+                rule=rule,
+                device=device,
+                tag=tag,
+                person=person,
+                now=now,
+                collection_log_id=collection_log_id,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Eventos de status de gateway (OFFLINE / ONLINE) como SESSÃO
+# (mantém coerência com relatórios: started_at / ended_at / duration)
 # ---------------------------------------------------------------------------
 
 async def handle_gateway_status_transition(
@@ -548,19 +786,15 @@ async def handle_gateway_status_transition(
     is_online_now: bool,
 ) -> None:
     """
-    Chamado, por exemplo, pelo endpoint /devices/status.
+    Sessão de OFFLINE:
 
-    - Se is_online_now=False e não existe evento GATEWAY_OFFLINE aberto:
-        cria um AlertEvent GATEWAY_OFFLINE (is_open=True)
-    - Se is_online_now=False e já existe evento OFFLINE aberto:
-        atualiza last_seen_at + offline_seconds no payload
-    - Se is_online_now=True e existe evento OFFLINE aberto:
-        fecha esse evento e cria um evento GATEWAY_ONLINE
+    - Se offline e não existe evento OFFLINE aberto: cria (is_open=True)
+    - Se offline e já existe: atualiza last_seen_at + offline_seconds no payload
+    - Se online e existe OFFLINE aberto: fecha (ended_at = last_seen_at da sessão OFFLINE)
+      e cria um evento ONLINE pontual (is_open=False, ended_at=now)
     """
-
     now = datetime.now(timezone.utc)
 
-    # Evento OFFLINE aberto para este device?
     stmt = (
         select(AlertEvent)
         .where(
@@ -574,32 +808,20 @@ async def handle_gateway_status_transition(
     res = await db.execute(stmt)
     offline_event = res.scalar_one_or_none()
 
-    # Helper de localização (prédio/planta)
-    async def _resolve_location() -> dict:
-        return await _get_location_info(db, device=device)
+    location = await _get_location_info(db, device=device)
 
-    # Nome amigável do gateway
     device_label = (
         getattr(device, "name", None)
         or getattr(device, "mac_address", None)
         or f"Device {device.id}"
     )
 
-    # Para calcular há quanto tempo está offline (com base no last_seen_at)
     last_seen = getattr(device, "last_seen_at", None)
-    if last_seen is not None and last_seen.tzinfo is None:
-        last_seen = last_seen.replace(tzinfo=timezone.utc)
-    offline_seconds_now = (
-        (now - last_seen).total_seconds() if last_seen is not None else 0
-    )
+    last_seen = _ensure_utc(last_seen) if last_seen is not None else None
+    offline_seconds_now = (now - last_seen).total_seconds() if last_seen else 0
 
-    # ------------------------------------------------------------------
-    # Caso 1: gateway está OFFLINE agora
-    # ------------------------------------------------------------------
     if not is_online_now:
         if offline_event is None:
-            # Primeira vez que detectamos OFFLINE -> cria evento
-            location = await _resolve_location()
             message = f"Gateway '{device_label}' ficou OFFLINE."
 
             payload_dict = {
@@ -614,6 +836,7 @@ async def handle_gateway_status_transition(
                 "building_name": location["building_name"],
                 "offline_started_at": now.isoformat(),
                 "offline_seconds": offline_seconds_now,
+                "is_open": True,
             }
 
             event_in = AlertEventCreate(
@@ -631,70 +854,36 @@ async def handle_gateway_status_transition(
                 ended_at=None,
                 is_open=True,
                 message=message,
-                payload=json.dumps(payload_dict, ensure_ascii=False),
+                payload=_safe_json_dump(payload_dict),
             )
-
             event = await crud_alert_event.create(db, event_in)
             await dispatch_webhooks(db, event)
         else:
-            # Já estava OFFLINE -> só atualiza duração/last_seen_at
-            try:
-                payload_dict = (
-                    json.loads(offline_event.payload)
-                    if offline_event.payload
-                    else {}
-                )
-            except json.JSONDecodeError:
-                payload_dict = {}
-
+            payload_dict = _safe_json_load(getattr(offline_event, "payload", None))
             payload_dict["offline_seconds"] = offline_seconds_now
+            payload_dict["last_seen_at"] = now.isoformat()
 
             updated_event = await crud_alert_event.update(
                 db,
                 offline_event,
                 {
                     "last_seen_at": now,
-                    "payload": json.dumps(payload_dict, ensure_ascii=False),
+                    "payload": _safe_json_dump(payload_dict),
                 },
             )
             await dispatch_webhooks(db, updated_event)
 
         return
 
-    # ------------------------------------------------------------------
-    # Caso 2: gateway está ONLINE agora
-    # ------------------------------------------------------------------
+    # ONLINE
     if offline_event is None:
-        # Não havia sessão OFFLINE aberta -> nada a fazer
         return
 
-    # Fecha a sessão OFFLINE e cria um evento ONLINE
-    try:
-        payload_dict = (
-            json.loads(offline_event.payload) if offline_event.payload else {}
-        )
-    except json.JSONDecodeError:
-        payload_dict = {}
+    # fecha offline como sessão
+    await _close_event_session(db, event=offline_event, reason="gateway_back_online")
 
-    # Usa o offline_seconds calculado com base no last_seen_at
-    payload_dict["offline_seconds"] = offline_seconds_now
-
-    closed_event = await crud_alert_event.update(
-        db,
-        offline_event,
-        {
-            "is_open": False,
-            "ended_at": now,
-            "last_seen_at": now,
-            "payload": json.dumps(payload_dict, ensure_ascii=False),
-        },
-    )
-    await dispatch_webhooks(db, closed_event)
-
-    # Cria um evento pontual de ONLINE
-    location = await _resolve_location()
+    # cria evento ONLINE pontual
     message = f"Gateway '{device_label}' voltou a ficar ONLINE."
-
     online_payload = {
         "event_type": GATEWAY_ONLINE,
         "device_id": device.id,
@@ -706,6 +895,8 @@ async def handle_gateway_status_transition(
         "building_id": location["building_id"],
         "building_name": location["building_name"],
         "offline_seconds": offline_seconds_now,
+        "is_open": False,
+        "ended_at": now.isoformat(),
     }
 
     online_event_in = AlertEventCreate(
@@ -723,138 +914,13 @@ async def handle_gateway_status_transition(
         ended_at=now,
         is_open=False,
         message=message,
-        payload=json.dumps(online_payload, ensure_ascii=False),
+        payload=_safe_json_dump(online_payload),
     )
-
     online_event = await crud_alert_event.create(db, online_event_in)
     await dispatch_webhooks(db, online_event)
 
 
-async def process_detection(
-    db: AsyncSession,
-    device: Device,
-    tag: Tag,
-) -> None:
-    """
-    Chamado a cada detecção (via MQTT ou API).
-
-    - Carrega pessoa + grupos SEM lazy-load
-    - Carrega regras aplicáveis ao device + grupos da pessoa
-    - Dispara FORBIDDEN_SECTOR e DWELL_TIME conforme necessário
-    """
-    now = datetime.now(timezone.utc)
-
-    # Carrega pessoa + grupos uma vez (sem lazy) e reaproveita
-    person, group_ids = await _get_person_with_groups(db, tag=tag)
-
-    # Carrega regras ativas para o device filtrando por grupo
-    rules = await _load_applicable_rules(
-        db,
-        device_id=device.id,
-        group_ids=group_ids,
-    )
-
-    if not rules:
-        return
-
-    for rule in rules:
-        if rule.rule_type == FORBIDDEN_SECTOR:
-            await _fire_forbidden_sector(
-                db=db,
-                rule=rule,
-                device=device,
-                tag=tag,
-                person=person,
-                now=now,
-            )
-        elif rule.rule_type == DWELL_TIME:
-            await _fire_dwell_time(
-                db=db,
-                rule=rule,
-                device=device,
-                tag=tag,
-                person=person,
-                now=now,
-            )
-
-
-# ---------------------------------------------------------------------------
-# Eventos de status de gateway (OFFLINE / ONLINE) - API p/ MQTT (se precisar)
-# ---------------------------------------------------------------------------
-
-async def _fire_gateway_status_event(
-    db: AsyncSession,
-    *,
-    device: Device,
-    now: datetime,
-    event_type: str,
-    offline_seconds: Optional[int] = None,
-) -> AlertEvent:
-    """
-    Cria um AlertEvent simples para mudança de status de gateway.
-
-    - event_type: GATEWAY_OFFLINE ou GATEWAY_ONLINE
-    - rule_id, person_id, tag_id, group_id = None (evento sistêmico)
-    """
-
-    # Enriquecimento com localização (planta/andar/prédio)
-    location = await _get_location_info(db, device=device)
-
-    device_label = (
-        getattr(device, "name", None)
-        or getattr(device, "mac_address", None)
-        or f"Device {device.id}"
-    )
-
-    if event_type == GATEWAY_OFFLINE:
-        if offline_seconds is None:
-            offline_seconds = 0
-        message = (
-            f"Gateway '{device_label}' OFFLINE "
-            f"(sem publicações há {int(offline_seconds)}s)."
-        )
-    elif event_type == GATEWAY_ONLINE:
-        message = f"Gateway '{device_label}' ONLINE novamente."
-    else:
-        raise ValueError(f"Unsupported gateway event_type: {event_type}")
-
-    payload_dict = {
-        "event_type": event_type,
-        "device_id": device.id,
-        "device_name": device_label,
-        "device_mac_address": getattr(device, "mac_address", None),
-        "floor_plan_id": location["floor_plan_id"],
-        "floor_plan_name": location["floor_plan_name"],
-        "floor_id": location["floor_id"],
-        "floor_name": location["floor_name"],
-        "building_id": location["building_id"],
-        "building_name": location["building_name"],
-        "offline_seconds": offline_seconds,
-    }
-
-    event_in = AlertEventCreate(
-        rule_id=None,
-        event_type=event_type,
-        person_id=None,
-        tag_id=None,
-        device_id=device.id,
-        floor_plan_id=location["floor_plan_id"],
-        floor_id=location["floor_id"],
-        building_id=location["building_id"],
-        group_id=None,
-        started_at=now,
-        last_seen_at=now,
-        ended_at=now,
-        is_open=False,  # evento “instantâneo”
-        message=message,
-        payload=json.dumps(payload_dict, ensure_ascii=False),
-    )
-
-    created = await crud_alert_event.create(db, event_in)
-    await dispatch_webhooks(db, created)
-    return created
-
-
+# wrappers usados pelo mqtt_ingestor (mantém compatibilidade)
 async def fire_gateway_offline_event(
     db: AsyncSession,
     *,
@@ -862,16 +928,22 @@ async def fire_gateway_offline_event(
     now: datetime,
     offline_seconds: int,
 ) -> AlertEvent:
-    """
-    API pública para o MQTT ingestor disparar evento de GATEWAY_OFFLINE.
-    """
-    return await _fire_gateway_status_event(
-        db,
-        device=device,
-        now=now,
-        event_type=GATEWAY_OFFLINE,
-        offline_seconds=offline_seconds,
+    # offline_seconds é derivável; mantemos compatibilidade com assinatura
+    await handle_gateway_status_transition(db, device=device, is_online_now=False)
+    # retorna o último evento OFFLINE aberto (best-effort)
+    stmt = (
+        select(AlertEvent)
+        .where(
+            AlertEvent.event_type == GATEWAY_OFFLINE,
+            AlertEvent.device_id == device.id,
+            AlertEvent.is_open.is_(True),
+        )
+        .order_by(AlertEvent.started_at.desc())
+        .limit(1)
     )
+    res = await db.execute(stmt)
+    ev = res.scalar_one_or_none()
+    return ev  # type: ignore[return-value]
 
 
 async def fire_gateway_online_event(
@@ -880,12 +952,17 @@ async def fire_gateway_online_event(
     device: Device,
     now: datetime,
 ) -> AlertEvent:
-    """
-    API pública para o MQTT ingestor disparar evento de GATEWAY_ONLINE.
-    """
-    return await _fire_gateway_status_event(
-        db,
-        device=device,
-        now=now,
-        event_type=GATEWAY_ONLINE,
+    await handle_gateway_status_transition(db, device=device, is_online_now=True)
+    # retorna evento ONLINE mais recente
+    stmt = (
+        select(AlertEvent)
+        .where(
+            AlertEvent.event_type == GATEWAY_ONLINE,
+            AlertEvent.device_id == device.id,
+        )
+        .order_by(AlertEvent.started_at.desc())
+        .limit(1)
     )
+    res = await db.execute(stmt)
+    ev = res.scalar_one_or_none()
+    return ev  # type: ignore[return-value]

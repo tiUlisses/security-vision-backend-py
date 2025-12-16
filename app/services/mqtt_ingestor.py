@@ -19,6 +19,7 @@ from app.services.alert_engine import (
     fire_gateway_offline_event,
     fire_gateway_online_event,
     process_detection,
+    close_stale_rtls_sessions,
 )
 from app.utils.mac import normalize_mac
 
@@ -397,10 +398,22 @@ class MqttIngestor:
                     rssi=rssi,
                     raw_payload=raw_payload,
                 )
-                await crud_collection_log.create(db, log_in)
+                created_log = await crud_collection_log.create(db, log_in)
 
-                # Alert engine
-                await process_detection(db, db_device, db_tag)
+                # Alert engine (não pode quebrar a coleta)
+                try:
+                    await process_detection(
+                        db,
+                        db_device,
+                        db_tag,
+                        collection_log_id=getattr(created_log, "id", None),
+                    )
+                except Exception:
+                    logger.exception(
+                        "AlertEngine failed for device_id=%s tag_id=%s",
+                        db_device.id,
+                        db_tag.id,
+                    )
 
     # ------------------------------------------------------------------
     # Offline / online monitor
@@ -495,7 +508,11 @@ class MqttIngestor:
                             await self._handle_gateway_online(db, dev, now)
 
                         self._gateway_status_cache[dev.id] = is_online
-
+                    # ✅ ETAPA 2 aqui
+                    try:
+                        await close_stale_rtls_sessions(db, now=now)
+                    except Exception:
+                        logger.exception("Error closing stale RTLS sessions")
             except Exception as e:
                 logger.exception("Error while running gateway offline monitor: %s", e)
 
