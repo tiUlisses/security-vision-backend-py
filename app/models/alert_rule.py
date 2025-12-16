@@ -1,10 +1,10 @@
-#securityvision-position/app/models/alert_rule.py
+# securityvision-position/app/models/alert_rule.py
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional, TYPE_CHECKING
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, text
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
@@ -45,6 +45,54 @@ class AlertRule(Base):
         server_default=text("TRUE"),
     )
 
+    # ----------------------------------------------------------------------
+    # Integração opcional com INCIDENTES (RTLS)
+    # ----------------------------------------------------------------------
+    create_incident: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+        default=False,
+    )
+    incident_kind: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # LOW|MEDIUM|HIGH|CRITICAL (string simples para evitar enum no DB por enquanto)
+    incident_severity: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'MEDIUM'"),
+        default="MEDIUM",
+    )
+
+    incident_title_template: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    incident_description_template: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    incident_sla_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    incident_assigned_group_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("support_groups.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    incident_assigned_to_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    incident_auto_close_on_end: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("FALSE"),
+        default=False,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
@@ -54,12 +102,8 @@ class AlertRule(Base):
         nullable=False,
     )
 
-    group: Mapped[Optional["PersonGroup"]] = relationship(
-        back_populates="alert_rules",
-    )
-    device: Mapped[Optional["Device"]] = relationship(
-        back_populates="alert_rules",
-    )
+    group: Mapped[Optional["PersonGroup"]] = relationship(back_populates="alert_rules")
+    device: Mapped[Optional["Device"]] = relationship(back_populates="alert_rules")
     events: Mapped[list["AlertEvent"]] = relationship(
         back_populates="rule",
         cascade="all, delete-orphan",

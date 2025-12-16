@@ -32,9 +32,6 @@ class AlertEvent(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
 
-    # -------------------------------------------------------------------------
-    # Chaves de contexto / origem do alerta
-    # -------------------------------------------------------------------------
     rule_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("alert_rules.id", ondelete="SET NULL"),
         nullable=True,
@@ -72,38 +69,45 @@ class AlertEvent(Base):
         nullable=True,
         index=True,
     )
-
-    # grupo de pessoas que disparou a regra (quando a regra tem group_id)
     group_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("person_groups.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
 
-    # -------------------------------------------------------------------------
-    # Controle de sessão do alerta
-    # -------------------------------------------------------------------------
-    # Quando a sessão de alerta começou (ex: entrou na área proibida)
+    # Já adicionamos antes (incidente opcional)
+    incident_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("incidents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # ✅ NOVO: evidência (CollectionLog que abriu e que atualizou por último)
+    first_collection_log_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("collection_logs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    last_collection_log_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("collection_logs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
-
-    # Última vez que a TAG foi vista ainda naquele contexto de alerta
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )
-
-    # Quando entendemos que acabou (ex: saiu da área proibida)
     ended_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
-
-    # True enquanto o alerta estiver ativo/aberto
     is_open: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -111,24 +115,9 @@ class AlertEvent(Base):
         default=True,
     )
 
-    # -------------------------------------------------------------------------
-    # Dados descritivos
-    # -------------------------------------------------------------------------
-    # Mensagem legível pro dashboard (ex: "Fulano entrou no setor proibido X")
-    message: Mapped[Optional[str]] = mapped_column(
-        String(1024),
-        nullable=True,
-    )
+    message: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # JSON/extra pra debug ou detalhes
-    payload: Mapped[Optional[str]] = mapped_column(
-        Text,  # ou String(4096) se preferir limitar
-        nullable=True,
-    )
-
-    # -------------------------------------------------------------------------
-    # Relacionamentos
-    # -------------------------------------------------------------------------
     rule: Mapped[Optional["AlertRule"]] = relationship(back_populates="events")
     person: Mapped[Optional["Person"]] = relationship()
     tag: Mapped[Optional["Tag"]] = relationship()

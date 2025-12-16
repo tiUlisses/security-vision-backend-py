@@ -1,4 +1,6 @@
 # app/schemas/alert_event.py
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 
@@ -16,6 +18,13 @@ class AlertEventBase(BaseModel):
     floor_id: Optional[int] = None
     building_id: Optional[int] = None
     group_id: Optional[int] = None
+
+    # incident link
+    incident_id: Optional[int] = None
+
+    # ✅ evidências
+    first_collection_log_id: Optional[int] = None
+    last_collection_log_id: Optional[int] = None
 
     message: Optional[str] = None
     payload: Optional[str] = None
@@ -40,6 +49,11 @@ class AlertEventUpdate(BaseModel):
     building_id: Optional[int] = None
     group_id: Optional[int] = None
 
+    incident_id: Optional[int] = None
+
+    first_collection_log_id: Optional[int] = None
+    last_collection_log_id: Optional[int] = None
+
     started_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
@@ -51,11 +65,9 @@ class AlertEventUpdate(BaseModel):
 
 class AlertEventRead(AlertEventBase):
     id: int
-
     started_at: datetime
     last_seen_at: datetime
     ended_at: Optional[datetime] = None
     is_open: bool
 
-    # Pydantic v2
     model_config = ConfigDict(from_attributes=True)

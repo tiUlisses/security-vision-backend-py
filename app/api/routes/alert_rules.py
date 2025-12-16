@@ -27,9 +27,12 @@ async def list_alert_rules(
     device_id: int | None = Query(default=None),
     is_active: bool | None = Query(default=None),
     db: AsyncSession = Depends(get_db_session),
+    create_incident: bool | None = Query(default=None),
 ):
     rules = await crud_alert_rule.get_multi(db, skip=skip, limit=limit)
 
+    if create_incident is not None:
+        rules = [r for r in rules if getattr(r, "create_incident", False) == create_incident]
     if rule_type is not None:
         rules = [r for r in rules if r.rule_type == rule_type]
     if group_id is not None:
@@ -60,15 +63,15 @@ async def create_alert_rule(
         db,
         event_type="ALERT_RULE_CREATED",
         payload={
-            "rule_id": rule.id,
-            "name": rule.name,
-            "description": rule.description,
-            "rule_type": rule.rule_type,
-            "group_id": rule.group_id,
-            "device_id": rule.device_id,
-            "max_dwell_seconds": rule.max_dwell_seconds,
-            "is_active": rule.is_active,
-            "created_at": created_at.isoformat() if created_at else None,
+            "create_incident": getattr(rule, "create_incident", False),
+            "incident_kind": getattr(rule, "incident_kind", None),
+            "incident_severity": getattr(rule, "incident_severity", None),
+            "incident_title_template": getattr(rule, "incident_title_template", None),
+            "incident_description_template": getattr(rule, "incident_description_template", None),
+            "incident_sla_minutes": getattr(rule, "incident_sla_minutes", None),
+            "incident_assigned_group_id": getattr(rule, "incident_assigned_group_id", None),
+            "incident_assigned_to_user_id": getattr(rule, "incident_assigned_to_user_id", None),
+            "incident_auto_close_on_end": getattr(rule, "incident_auto_close_on_end", False),
         },
     )
 
