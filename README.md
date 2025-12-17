@@ -54,28 +54,6 @@ Além disso, o backend serve arquivos em **`/media`** (upload de anexos e outras
 
 ---
 
-## Arquitetura (alto nível)
-
-```mermaid
-flowchart LR
-  subgraph Ingress
-    GW[Gateways RTLS] -->|MQTT rtls/gateways/#| API
-    CAM[CAM-BUS (câmeras)] -->|MQTT rtls/cameras/#| API
-  end
-
-  subgraph Backend["SecurityVision API (FastAPI)"]
-    API -->|CRUD /api/v1/*| DB[(PostgreSQL)]
-    API --> MEDIA[/media (StaticFiles)/]
-    API --> OUT[Webhook Dispatcher]
-    API --> CW[Chatwoot Client]
-  end
-
-  OUT --> EXT[Integrações externas]
-  CW --> CHATWOOT[Chatwoot]
-```
-
----
-
 ## Estrutura do repositório
 
 ```text
