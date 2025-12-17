@@ -18,6 +18,7 @@ def main() -> int:
     interval_s = float(os.getenv("DB_WAIT_INTERVAL", "2"))
     url = build_db_url()
     start = time.time()
+
     while time.time() - start < timeout_s:
         try:
             conn = psycopg2.connect(url)
@@ -27,6 +28,7 @@ def main() -> int:
         except Exception as e:
             print(f"[wait_for_db] waiting for Postgres... ({e})")
             time.sleep(interval_s)
+
     print("[wait_for_db] ERROR: Postgres not ready")
     return 1
 
