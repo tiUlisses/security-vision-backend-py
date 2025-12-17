@@ -12,6 +12,7 @@ from app.services.chatwoot_client import ChatwootClient
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.incident_message import IncidentMessage
+from sqlalchemy.exc import IntegrityError
 
 from fastapi import (
     APIRouter,
@@ -224,6 +225,9 @@ async def create_incident_from_device_event(
     }
     """
     dev_event = await crud_device_event.get(db, id=device_event_id)
+    existing = await crud_incident.get_by_device_event(db, device_event_id=dev_event.id)
+    if existing:
+        return existing
     if not dev_event:
         raise HTTPException(status_code=404, detail="DeviceEvent not found")
 
@@ -380,6 +384,9 @@ async def create_incident_from_event(
     # 0) Validações básicas
     # ------------------------------------------------------------------
     db_event = await crud_device_event.get(db, id=body.device_event_id)
+    existing = await crud_incident.get_by_device_event(db, device_event_id=db_event.id)
+    if existing:
+        return existing
     if not db_event:
         raise HTTPException(status_code=404, detail="DeviceEvent not found")
 
@@ -442,11 +449,13 @@ async def create_incident_from_event(
     # ------------------------------------------------------------------
     try:
         db_inc = await crud_incident.create(db, obj_in=data)
-    except Exception:
-        logger.exception("[incidents] erro ao criar incidente from-event (device_event_id=%s)", db_event.id)
-        raise HTTPException(status_code=500, detail="Erro ao criar incidente a partir do evento.")
-
-    # ------------------------------------------------------------------
+    except IntegrityError:
+        await db.rollback()
+        existing = await crud_incident.get_by_device_event(db, device_event_id=db_event.id)
+        if existing:
+            return existing
+        raise HTTPException(status_code=409, detail="Incident already exists for this device_event_id")
+        # ------------------------------------------------------------------
     # 2) Mensagem SYSTEM de contexto
     # ------------------------------------------------------------------
     try:
