@@ -36,7 +36,9 @@ COPY . .
 RUN chmod +x ./docker/entrypoint.sh
 
 RUN adduser --disabled-password --gecos '' appuser \
+ && mkdir -p /app/media \
  && chown -R appuser:appuser /app
+
 
 USER appuser
 
