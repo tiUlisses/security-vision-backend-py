@@ -1,0 +1,14 @@
+services:
+  api:
+    build:
+      context: .
+      target: prod
+    image: securityvision-backend:${IMAGE_TAG:-prod}
+    env_file:
+      - env/.env.prod
+    environment:
+      DB_WAIT: "1"
+      RUN_MIGRATIONS: "1"
+    volumes:
+      - media:/app/media
+    restart: unless-stopped
