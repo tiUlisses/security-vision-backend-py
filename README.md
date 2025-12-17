@@ -180,24 +180,7 @@ security-vision-backend-py-main/
 │   └── .env.prod
 ├── media/
 │   ├── floor_plans/
-│   │   ├── floor_1.jpeg
-│   │   ├── floor_1.jpg
-│   │   ├── floor_1.webp
-│   │   ├── floor_2.jpeg
-│   │   ├── floor_2.jpg
-│   │   ├── floor_2.webp
-│   │   ├── floor_3.jpg
-│   │   ├── floor_3.webp
-│   │   ├── floor_4.webp
-│   │   ├── floor_5.jpg
-│   │   ├── floor_5.webp
-│   │   ├── floor_6.jpg
-│   │   ├── floor_7.jpg
-│   │   ├── floor_7.webp
-│   │   └── floor_8.webp
 │   └── incidents/
-│       ├── 1/
-│       └── 3/
 ├── scripts/
 │   ├── simulate_gateways.py
 │   └── test_create_camera.py
