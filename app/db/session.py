@@ -12,10 +12,14 @@ from app.db.base import Base  # 🔴 ajuste o import se o seu Base estiver em ou
 # ----------------------------------------------------------------------
 # Engine assíncrono usando a URL já tratada em settings.database_url
 # ----------------------------------------------------------------------
+engine_kwargs = {
+    "future": True,
+    "echo": False,  # coloque True se quiser ver o SQL no log
+}
+
 engine = create_async_engine(
     settings.database_url,
-    future=True,
-    echo=False,  # coloque True se quiser ver o SQL no log
+    **engine_kwargs,
 )
 
 # ----------------------------------------------------------------------

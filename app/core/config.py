@@ -44,6 +44,47 @@ class Settings(BaseSettings):
     APP_NAME: str = "SecurityVision"
 
     # ------------------------------------------------------------------
+    # Autenticação / JWT
+    # ------------------------------------------------------------------
+    JWT_SECRET_KEY: str = Field(
+        default="change-me-in-production",
+        alias="SVPOS_SECRET_KEY",
+        description="Chave secreta usada para assinar JWTs. Sempre sobrescreva em produção.",
+    )
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=1440,
+        alias="SVPOS_ACCESS_TOKEN_EXPIRE_MINUTES",
+        description="Tempo de expiração (minutos) do access token.",
+    )
+    JWT_ISSUER: str = Field(
+        default="security-vision",
+        description="Identificador do emissor dos tokens.",
+    )
+    JWT_AUDIENCE: str = Field(
+        default="security-vision-clients",
+        description="Audiência padrão dos tokens.",
+    )
+    ALLOW_ANONYMOUS_DEV_MODE: bool = Field(
+        default=True,
+        description=(
+            "Se True, permite que rotas protegidas aceitem um usuário dev fictício "
+            "quando não há token. Use apenas em desenvolvimento/testes."
+        ),
+    )
+    TESTING: bool = Field(
+        default=True,
+        description="Indica execução de testes; ativa fallback para SQLite.",
+    )
+    SQLITE_FALLBACK_ENABLED: bool = Field(
+        default=True,
+        description="Habilita fallback automático para SQLite durante testes.",
+    )
+    SQLITE_FALLBACK_URL: str = Field(
+        default="sqlite+aiosqlite:///./test.db",
+        description="URL de banco usada no fallback de testes.",
+    )
+
+    # ------------------------------------------------------------------
     # Redis
     # ------------------------------------------------------------------
     redis_host: str = "localhost"
@@ -105,9 +146,15 @@ class Settings(BaseSettings):
 
         Prioridade:
         1) se DATABASE_URL estiver setada no .env, usa ela
-        2) senão, monta a partir de rtls_db_* e garante +asyncpg
+        2) se estiver em testes (TESTING ou PYTEST_CURRENT_TEST) e fallback habilitado, usa SQLite
+        3) senão, monta a partir de rtls_db_* e garante +asyncpg
         """
         url = self.DATABASE_URL
+
+        # Fallback para testes sem Postgres disponível
+        if self.SQLITE_FALLBACK_ENABLED and (self.TESTING or os.getenv("PYTEST_CURRENT_TEST")):
+            return self.SQLITE_FALLBACK_URL
+
         if not url:
             url = (
                 f"postgresql+asyncpg://"
