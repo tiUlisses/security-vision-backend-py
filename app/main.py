@@ -10,6 +10,10 @@ from fastapi.staticfiles import StaticFiles
 from app.api.v1.api import api_router
 from app.core.config import settings
 from app.db.session import init_db
+from app.crud.user import user as crud_user
+from app.core.security import get_password_hash
+from app.schemas.user import UserCreate
+from app.db.session import AsyncSessionLocal
 from app.services.mqtt_ingestor import MqttIngestor
 from app.services.cambus_event_collector import run_cambus_event_collector  # 👈 NOVO
 
@@ -49,6 +53,25 @@ async def on_startup() -> None:
     global _mqtt_task, _cambus_task
 
     await init_db()
+
+    # Bootstrap do primeiro superadmin se configurado
+    if settings.SUPERADMIN_EMAIL and settings.SUPERADMIN_PASSWORD:
+        async with AsyncSessionLocal() as db:
+            has_admin = await crud_user.has_admin(db)
+            if not has_admin:
+                pwd_hash = get_password_hash(settings.SUPERADMIN_PASSWORD)
+                await crud_user.create_with_hashed_password(
+                    db,
+                    obj_in=UserCreate(
+                        email=settings.SUPERADMIN_EMAIL,
+                        full_name=settings.SUPERADMIN_NAME,
+                        role="SUPERADMIN",
+                        is_active=True,
+                        is_superuser=True,
+                        password=settings.SUPERADMIN_PASSWORD,
+                    ),
+                    hashed_password=pwd_hash,
+                )
 
     # 👇 Ingestor de gateways RTLS (já existia)
     if settings.MQTT_ENABLED:

@@ -6,7 +6,6 @@ from typing import List, Optional, TYPE_CHECKING
 
 from sqlalchemy import Float, ForeignKey, String, Integer, text, Column, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import JSONB
 from app.db.base_class import Base
 
 if TYPE_CHECKING:
@@ -78,7 +77,7 @@ class Device(Base):
     manufacturer: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     shard: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    analytics = Column(JSONB, nullable=True)
+    analytics = Column(JSON, nullable=True)
     # para cálculo de online/offline
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 

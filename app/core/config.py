@@ -44,6 +44,41 @@ class Settings(BaseSettings):
     APP_NAME: str = "SecurityVision"
 
     # ------------------------------------------------------------------
+    # Autenticação / JWT
+    # ------------------------------------------------------------------
+    JWT_SECRET_KEY: str = Field(
+        default="change-me-in-production",
+        alias="SVPOS_SECRET_KEY",
+        description="Chave secreta usada para assinar JWTs. Sempre sobrescreva em produção.",
+    )
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=1440,
+        alias="SVPOS_ACCESS_TOKEN_EXPIRE_MINUTES",
+        description="Tempo de expiração (minutos) do access token.",
+    )
+    JWT_ISSUER: str = Field(
+        default="security-vision",
+        description="Identificador do emissor dos tokens.",
+    )
+    JWT_AUDIENCE: str = Field(
+        default="security-vision-clients",
+        description="Audiência padrão dos tokens.",
+    )
+    JWT_ISSUER: str = Field(
+        default="security-vision",
+        description="Identificador do emissor dos tokens.",
+    )
+    ALLOW_ANONYMOUS_DEV_MODE: bool = Field(
+        default=False,
+        description="Se True, permite bypass de autenticação em desenvolvimento/teste.",
+    )
+
+    # Bootstrap do primeiro superadmin (opcional)
+    SUPERADMIN_EMAIL: Optional[str] = None
+    SUPERADMIN_PASSWORD: Optional[str] = None
+    SUPERADMIN_NAME: str = "System Admin"
+
+    # ------------------------------------------------------------------
     # Redis
     # ------------------------------------------------------------------
     redis_host: str = "localhost"
@@ -108,6 +143,7 @@ class Settings(BaseSettings):
         2) senão, monta a partir de rtls_db_* e garante +asyncpg
         """
         url = self.DATABASE_URL
+
         if not url:
             url = (
                 f"postgresql+asyncpg://"
