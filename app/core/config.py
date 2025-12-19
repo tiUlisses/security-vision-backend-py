@@ -44,6 +44,28 @@ class Settings(BaseSettings):
     APP_NAME: str = "SecurityVision"
 
     # ------------------------------------------------------------------
+    # Autenticação / JWT
+    # ------------------------------------------------------------------
+    JWT_SECRET_KEY: str = Field(
+        default="change-me-in-production",
+        alias="SVPOS_SECRET_KEY",
+        description="Chave secreta usada para assinar JWTs. Sempre sobrescreva em produção.",
+    )
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=1440,
+        alias="SVPOS_ACCESS_TOKEN_EXPIRE_MINUTES",
+        description="Tempo de expiração (minutos) do access token.",
+    )
+    JWT_ISSUER: str = Field(
+        default="security-vision",
+        description="Identificador do emissor dos tokens.",
+    )
+    JWT_AUDIENCE: str = Field(
+        default="security-vision-clients",
+        description="Audiência padrão dos tokens.",
+    )
+
+    # ------------------------------------------------------------------
     # Redis
     # ------------------------------------------------------------------
     redis_host: str = "localhost"
