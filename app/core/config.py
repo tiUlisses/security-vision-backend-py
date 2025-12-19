@@ -1,7 +1,6 @@
 # app/core/config.py
 from typing import Optional
 import os
-from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AnyHttpUrl
 
@@ -76,16 +75,8 @@ class Settings(BaseSettings):
         ),
     )
     TESTING: bool = Field(
-        default=True,
-        description="Indica execução de testes; ativa fallback para SQLite.",
-    )
-    SQLITE_FALLBACK_ENABLED: bool = Field(
-        default=True,
-        description="Habilita fallback automático para SQLite durante testes.",
-    )
-    SQLITE_FALLBACK_URL: str = Field(
-        default="sqlite+aiosqlite:///./test.db",
-        description="URL de banco usada no fallback de testes.",
+        default=False,
+        description="Indica execução de testes (mantido apenas para compatibilidade).",
     )
 
     # Bootstrap do primeiro superadmin (opcional)
@@ -155,14 +146,9 @@ class Settings(BaseSettings):
 
         Prioridade:
         1) se DATABASE_URL estiver setada no .env, usa ela
-        2) se estiver em testes (TESTING ou PYTEST_CURRENT_TEST) e fallback habilitado, usa SQLite
-        3) senão, monta a partir de rtls_db_* e garante +asyncpg
+        2) senão, monta a partir de rtls_db_* e garante +asyncpg
         """
         url = self.DATABASE_URL
-
-        # Fallback para testes sem Postgres disponível
-        if self.SQLITE_FALLBACK_ENABLED and (self.TESTING or os.getenv("PYTEST_CURRENT_TEST")):
-            return self.SQLITE_FALLBACK_URL
 
         if not url:
             url = (

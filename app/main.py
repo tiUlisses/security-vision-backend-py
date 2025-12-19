@@ -48,30 +48,46 @@ _mqtt_task: asyncio.Task | None = None
 _cambus_task: asyncio.Task | None = None   # 👈 NOVO
 
 
+async def _bootstrap_superadmin() -> None:
+    """
+    Cria o primeiro superusuário a partir das variáveis do .env
+    (SUPERADMIN_EMAIL, SUPERADMIN_PASSWORD, SUPERADMIN_NAME) apenas
+    quando ainda não existe nenhum admin no banco.
+    """
+    if not (settings.SUPERADMIN_EMAIL and settings.SUPERADMIN_PASSWORD):
+        logger.info("SUPERADMIN_EMAIL/PASSWORD não configurados; pulando bootstrap de superadmin")
+        return
+
+    async with AsyncSessionLocal() as db:
+        has_admin = await crud_user.has_admin(db)
+        if has_admin:
+            logger.info("Bootstrap de superadmin não necessário: já existe admin no banco")
+            return
+
+        logger.info("Criando superadmin inicial a partir do .env (%s)", settings.SUPERADMIN_EMAIL)
+        pwd_hash = get_password_hash(settings.SUPERADMIN_PASSWORD)
+        await crud_user.create_with_hashed_password(
+            db,
+            obj_in=UserCreate(
+                email=settings.SUPERADMIN_EMAIL,
+                full_name=settings.SUPERADMIN_NAME,
+                role="SUPERADMIN",
+                is_active=True,
+                is_superuser=True,
+                password=settings.SUPERADMIN_PASSWORD,
+            ),
+            hashed_password=pwd_hash,
+        )
+        logger.info("Superadmin %s criado com sucesso", settings.SUPERADMIN_EMAIL)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     global _mqtt_task, _cambus_task
 
     await init_db()
 
-    # Bootstrap do primeiro superadmin se configurado
-    if settings.SUPERADMIN_EMAIL and settings.SUPERADMIN_PASSWORD:
-        async with AsyncSessionLocal() as db:
-            has_admin = await crud_user.has_admin(db)
-            if not has_admin:
-                pwd_hash = get_password_hash(settings.SUPERADMIN_PASSWORD)
-                await crud_user.create_with_hashed_password(
-                    db,
-                    obj_in=UserCreate(
-                        email=settings.SUPERADMIN_EMAIL,
-                        full_name=settings.SUPERADMIN_NAME,
-                        role="SUPERADMIN",
-                        is_active=True,
-                        is_superuser=True,
-                        password=settings.SUPERADMIN_PASSWORD,
-                    ),
-                    hashed_password=pwd_hash,
-                )
+    await _bootstrap_superadmin()
 
     # 👇 Ingestor de gateways RTLS (já existia)
     if settings.MQTT_ENABLED:
