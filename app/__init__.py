@@ -1,0 +1,3 @@
+"""
+Pacote app inicial.
+"""

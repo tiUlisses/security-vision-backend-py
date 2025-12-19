@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.alert_engine import handle_gateway_status_transition
 from app.services.webhook_dispatcher import dispatch_generic_webhook
-from app.api.deps import get_db_session
+from app.api.deps import (
+    get_current_active_user,
+    get_current_admin_user,
+    get_db_session,
+)
 from app.services.cambus_publisher import (
     publish_camera_info_from_device,
     disable_cambus_topics_for_device,  # 👈 importante p/ desabilitar tópicos antigos
@@ -94,6 +98,7 @@ async def list_devices(
     skip: int = 0,
     limit: int = 100,
     db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_active_user),
 ):
     """
     Lista genérica de devices (gateways, câmeras, controladores, etc).
@@ -109,6 +114,7 @@ async def list_devices(
 async def create_device(
     device_in: DeviceCreate,
     db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_admin_user),
 ):
     """
     Cria um device genérico.
@@ -153,6 +159,7 @@ async def list_device_status(
         description="Se true, retorna apenas devices do tipo BLE_GATEWAY",
     ),
     db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_active_user),
 ):
     """
     Retorna o status ONLINE/OFFLINE de cada device, baseado no last_seen_at.
@@ -168,6 +175,7 @@ async def list_device_status(
 async def get_device(
     device_id: int,
     db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_active_user),
 ):
     db_obj = await crud_device.get(db, id=device_id)
     if not db_obj:
@@ -180,6 +188,7 @@ async def update_device(
     device_id: int,
     device_in: DeviceUpdate,
     db: AsyncSession = Depends(get_db_session),
+    current_user=Depends(get_current_admin_user),
 ):
     db_obj = await crud_device.get(db, id=device_id)
     if not db_obj:
