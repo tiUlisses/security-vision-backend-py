@@ -3,11 +3,11 @@ from collections.abc import AsyncGenerator  # ✅ esse basta
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.security import ALGORITHM, SECRET_KEY
+from app.core.security import ALGORITHM, SECRET_KEY, decode_access_token
 from app.crud.user import user as crud_user
 from app.db.session import AsyncSessionLocal
 from app.models.user import User
@@ -54,7 +54,7 @@ async def get_current_user(
             return _dev_superuser()
         raise credentials_exception
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = decode_access_token(token)
         sub = payload.get("sub")
         if sub is None:
             raise credentials_exception

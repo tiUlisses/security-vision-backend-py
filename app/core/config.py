@@ -64,6 +64,10 @@ class Settings(BaseSettings):
         default="security-vision-clients",
         description="Audiência padrão dos tokens.",
     )
+    JWT_ISSUER: str = Field(
+        default="security-vision",
+        description="Identificador do emissor dos tokens.",
+    )
     ALLOW_ANONYMOUS_DEV_MODE: bool = Field(
         default=True,
         description=(
@@ -83,6 +87,11 @@ class Settings(BaseSettings):
         default="sqlite+aiosqlite:///./test.db",
         description="URL de banco usada no fallback de testes.",
     )
+
+    # Bootstrap do primeiro superadmin (opcional)
+    SUPERADMIN_EMAIL: Optional[str] = None
+    SUPERADMIN_PASSWORD: Optional[str] = None
+    SUPERADMIN_NAME: str = "System Admin"
 
     # ------------------------------------------------------------------
     # Redis
