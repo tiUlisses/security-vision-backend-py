@@ -270,3 +270,21 @@ class PersonTimeOfDayByGateway(BaseModel):
     from_ts: Optional[datetime]
     to_ts: Optional[datetime]
     buckets: List[PersonHourByGatewayBucket]
+
+
+class PresenceTransitionReportItem(BaseModel):
+    tag_id: int
+    tag_label: Optional[str] = None
+
+    person_id: Optional[int] = None
+    person_full_name: Optional[str] = None
+
+    from_device_id: int
+    from_device_name: Optional[str] = None
+
+    to_device_id: int
+    to_device_name: Optional[str] = None
+
+    transition_start_at: datetime
+    transition_end_at: datetime
+    transition_seconds: int

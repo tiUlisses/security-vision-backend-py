@@ -1,6 +1,7 @@
 from app.db.base_class import Base  # noqa
 
 from app.models.presence_session import PresenceSession
+from app.models.presence_transition import PresenceTransition
 from app.models.presence_daily_usage import PresenceDailyUsage
 from app.models.building import Building  # noqa
 from app.models.floor import Floor  # noqa
@@ -31,6 +32,7 @@ __all__ = [
     "WebhookSubscription",
     "AlertEvent",
     "PresenceSession",
+    "PresenceTransition",
     "PresenceDailyUsage",
     "DeviceTopic",
     "DeviceEvent",
