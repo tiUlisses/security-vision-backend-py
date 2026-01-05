@@ -16,6 +16,7 @@ from app.schemas.user import UserCreate
 from app.db.session import AsyncSessionLocal
 from app.services.mqtt_ingestor import MqttIngestor
 from app.services.cambus_event_collector import run_cambus_event_collector  # 👈 NOVO
+from app.services.presence_rollup import run_rollup_loop
 
 logger = logging.getLogger("rtls.main")
 
@@ -46,6 +47,7 @@ app.mount(
 
 _mqtt_task: asyncio.Task | None = None
 _cambus_task: asyncio.Task | None = None   # 👈 NOVO
+_presence_rollup_task: asyncio.Task | None = None
 
 
 async def _bootstrap_superadmin() -> None:
@@ -83,7 +85,7 @@ async def _bootstrap_superadmin() -> None:
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    global _mqtt_task, _cambus_task
+    global _mqtt_task, _cambus_task, _presence_rollup_task
 
     await init_db()
 
@@ -103,10 +105,20 @@ async def on_startup() -> None:
             name="cambus_event_collector",
         )
 
+    if settings.PRESENCE_ROLLUP_ENABLED:
+        logger.info("Starting presence rollup task...")
+        _presence_rollup_task = asyncio.create_task(
+            run_rollup_loop(
+                retention_days=settings.PRESENCE_LOG_RETENTION_DAYS,
+                interval_minutes=settings.PRESENCE_ROLLUP_INTERVAL_MINUTES,
+            ),
+            name="presence_rollup",
+        )
+
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global _mqtt_task, _cambus_task
+    global _mqtt_task, _cambus_task, _presence_rollup_task
 
     # Para o ingestor de gateways
     if _mqtt_task:
@@ -125,6 +137,14 @@ async def on_shutdown() -> None:
             await _cambus_task
         except asyncio.CancelledError:
             logger.info("CAM-BUS event collector task cancelled")
+
+    if _presence_rollup_task:
+        logger.info("Stopping presence rollup task...")
+        _presence_rollup_task.cancel()
+        try:
+            await _presence_rollup_task
+        except asyncio.CancelledError:
+            logger.info("Presence rollup task cancelled")
 
 
 @app.get("/health", tags=["health"])

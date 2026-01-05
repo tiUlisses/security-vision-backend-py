@@ -64,6 +64,14 @@ class Settings(BaseSettings):
             "Quantidade de dias para manter collection_logs brutos antes do rollup/purge."
         ),
     )
+    PRESENCE_ROLLUP_ENABLED: bool = Field(
+        default=False,
+        description="Se True, executa rollup/purge automaticamente em background.",
+    )
+    PRESENCE_ROLLUP_INTERVAL_MINUTES: int = Field(
+        default=60,
+        description="Intervalo (em minutos) entre execuções do rollup/purge automático.",
+    )
     # ==================================================================
 
     # Config Pydantic v2
