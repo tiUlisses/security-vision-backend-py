@@ -1,0 +1,76 @@
+services:
+  api:
+    build:
+      context: .
+      target: dev
+    container_name: securityvision-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - env/.env.dev
+    environment:
+      DB_WAIT: "1"
+      RUN_MIGRATIONS: "1"
+    volumes:
+      - ./:/app
+      - media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      mqtt:
+        condition: service_started
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    container_name: securityvision-db
+    environment:
+      POSTGRES_DB: rtls_db
+      POSTGRES_USER: rtls
+      POSTGRES_PASSWORD: rtls123
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: securityvision-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: securityvision-mqtt
+    ports:
+      - "1883:1883"
+    volumes:
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
+
+  adminer:
+    image: adminer:4
+    profiles: ["tools"]
+    container_name: securityvision-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  media:
+  mosquitto-data:
+  mosquitto-log:
