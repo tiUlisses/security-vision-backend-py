@@ -111,9 +111,29 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 - `PRESENCE_SESSION_GAP_SECONDS` *(opcional, default: 15s)*: define o intervalo máximo entre
   `collection_logs` consecutivos para que continuem na mesma sessão.
+- `PRESENCE_LOG_RETENTION_DAYS` *(opcional, default: 30)*: dias de retenção de logs brutos
+  (`collection_logs`) antes do rollup/purge.
 
 A view `presence_sessions` agrega os registros de `collection_logs` por `(tag_id, device_id)`
 em sessões contínuas usando esse gap, expondo início, fim, duração e quantidade de amostras.
+
+#### Retenção e rollups de presença
+
+Estratégia recomendada:
+
+- Manter `collection_logs` apenas na janela recente (ex.: 30 dias).
+- Consolidar histórico em `presence_daily_usage` (rollup diário).
+
+Job sugerido (cron/async), que agrega e faz purge dos logs fora da retenção:
+
+```bash
+python scripts/rollup_presence_logs.py --retention-days 30
+```
+
+Plano de queries para relatórios:
+
+- Janela recente: consultar `presence_sessions` diretamente.
+- Histórico: consultar `presence_daily_usage` e combinar com a janela recente quando necessário.
 
 ### MQTT (RTLS Gateways)
 

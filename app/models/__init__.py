@@ -8,6 +8,7 @@ from app.models.tag import Tag
 from app.models.collection_log import CollectionLog
 from app.models.device_topic import DeviceTopic
 from app.models.presence_session import PresenceSession
+from app.models.presence_daily_usage import PresenceDailyUsage
 from app.models.person_group import PersonGroup
 from app.models.alert_rule import AlertRule
 from app.models.webhook_subscription import WebhookSubscription
@@ -33,6 +34,7 @@ __all__ = [
     "WebhookSubscription",
     "AlertEvent",
     "PresenceSession",
+    "PresenceDailyUsage",
     "DeviceTopic",
     "DeviceEvent",
     "IncidentMessage",
@@ -40,5 +42,4 @@ __all__ = [
     "IncidentRule",
     "Incident",
     "SupportGroup",
-    
 ]

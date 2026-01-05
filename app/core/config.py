@@ -58,6 +58,12 @@ class Settings(BaseSettings):
             "sessão de presença."
         ),
     )
+    PRESENCE_LOG_RETENTION_DAYS: int = Field(
+        default=30,
+        description=(
+            "Quantidade de dias para manter collection_logs brutos antes do rollup/purge."
+        ),
+    )
     # ==================================================================
 
     # Config Pydantic v2
