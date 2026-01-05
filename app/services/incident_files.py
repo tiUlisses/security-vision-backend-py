@@ -21,10 +21,7 @@ def _get_media_root() -> Path:
     Diretório base para salvar arquivos de mídia.
     Usa settings.MEDIA_ROOT se existir, senão 'media'.
     """
-    base = getattr(settings, "MEDIA_ROOT", None)
-    if base:
-        return Path(base)
-    return Path("media")
+    return Path(settings.media_root)
 
 
 def guess_media_type_from_content_type(content_type: str | None) -> str:
@@ -82,7 +79,7 @@ async def save_incident_file(
             f.write(chunk)
 
     # monta URL pública
-    base_url = getattr(settings, "MEDIA_BASE_URL", None)
+    base_url = settings.MEDIA_BASE_URL
     if base_url:
         base_url = base_url.rstrip("/")
         media_url = f"{base_url}/incidents/{incident_id}/{filename}"
