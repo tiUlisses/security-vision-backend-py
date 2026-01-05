@@ -96,6 +96,96 @@ WEBHOOK_EVENT_TYPES: List[WebhookEventTypeMeta] = [
             },
         },
     ),
+    # Incidentes – criação
+    WebhookEventTypeMeta(
+        event_type="INCIDENT_CREATED",
+        label="Criação de incidente",
+        description="Disparado quando um incidente é criado.",
+        sample_payload={
+            "event_type": "INCIDENT_CREATED",
+            "occurred_at": "2024-01-01T12:34:56Z",
+            "data": {
+                "incident": {
+                    "id": 501,
+                    "device_id": 10,
+                    "device_event_id": 987,
+                    "kind": "CAMERA_EVENT",
+                    "tenant": "ACME",
+                    "status": "OPEN",
+                    "severity": "MEDIUM",
+                    "title": "Pessoa não autorizada na área restrita",
+                    "description": "Detecção pela câmera da recepção.",
+                    "sla_minutes": 60,
+                    "due_at": "2024-01-01T13:34:56Z",
+                    "assigned_group_id": 3,
+                    "assigned_to_user_id": 12,
+                    "created_at": "2024-01-01T12:34:56Z",
+                    "updated_at": "2024-01-01T12:34:56Z",
+                }
+            },
+        },
+    ),
+    # Incidentes – alteração de status
+    WebhookEventTypeMeta(
+        event_type="INCIDENT_STATUS_CHANGED",
+        label="Status do incidente alterado",
+        description="Disparado quando o status do incidente muda.",
+        sample_payload={
+            "event_type": "INCIDENT_STATUS_CHANGED",
+            "occurred_at": "2024-01-01T12:50:00Z",
+            "data": {
+                "incident": {
+                    "id": 501,
+                    "status": "IN_PROGRESS",
+                    "severity": "MEDIUM",
+                    "title": "Pessoa não autorizada na área restrita",
+                    "updated_at": "2024-01-01T12:50:00Z",
+                },
+                "previous_status": "OPEN",
+            },
+        },
+    ),
+    # Incidentes – reabertura
+    WebhookEventTypeMeta(
+        event_type="INCIDENT_REOPENED",
+        label="Reabertura de incidente",
+        description="Disparado quando um incidente fechado é reaberto.",
+        sample_payload={
+            "event_type": "INCIDENT_REOPENED",
+            "occurred_at": "2024-01-01T13:10:00Z",
+            "data": {
+                "incident": {
+                    "id": 501,
+                    "status": "OPEN",
+                    "severity": "MEDIUM",
+                    "title": "Pessoa não autorizada na área restrita",
+                    "closed_at": None,
+                    "updated_at": "2024-01-01T13:10:00Z",
+                },
+                "previous_status": "CLOSED",
+            },
+        },
+    ),
+    # Incidentes – mensagem criada
+    WebhookEventTypeMeta(
+        event_type="INCIDENT_MESSAGE_CREATED",
+        label="Mensagem do incidente criada",
+        description="Disparado quando uma mensagem é adicionada na timeline do incidente.",
+        sample_payload={
+            "event_type": "INCIDENT_MESSAGE_CREATED",
+            "occurred_at": "2024-01-01T13:15:00Z",
+            "data": {
+                "incident_id": 501,
+                "message": {
+                    "id": 901,
+                    "message_type": "TEXT",
+                    "content": "Equipe em deslocamento para verificação.",
+                    "author_name": "Operador",
+                    "created_at": "2024-01-01T13:15:00Z",
+                },
+            },
+        },
+    ),
     # Alertas – área proibida
     WebhookEventTypeMeta(
         event_type="FORBIDDEN_SECTOR",
