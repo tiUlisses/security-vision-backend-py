@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.incident import Incident
+from app.models.incident_message import IncidentMessage
 from app.models.device_event import DeviceEvent
 from app.schemas.incident import IncidentUpdate
 from app.crud import (
@@ -57,6 +58,29 @@ def build_incident_webhook_payload(
         "updated_at": _to_iso(incident.updated_at),
         "closed_at": _to_iso(incident.closed_at),
     }
+
+
+def build_incident_message_webhook_payload(
+    message: IncidentMessage,
+    *,
+    source: str,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "incident_id": message.incident_id,
+        "message_id": message.id,
+        "message_type": message.message_type,
+        "content": message.content,
+        "author_name": message.author_name,
+        "source": source,
+    }
+
+    if message.media_url:
+        payload["media_url"] = message.media_url
+
+    if message.media_type:
+        payload["media_type"] = message.media_type
+
+    return payload
 
 
 def compute_sla_fields(

@@ -34,6 +34,7 @@ from app.services.incident_files import (
 from app.services.incidents import (
     apply_incident_update,
     build_incident_webhook_payload,
+    build_incident_message_webhook_payload,
     compute_sla_fields,
     infer_incident_kind_from_event,
     extract_media_from_event,
@@ -365,6 +366,12 @@ async def create_incident_message(
             db_inc.id,
         )
 
+    await dispatch_generic_webhook(
+        db,
+        event_type="INCIDENT_MESSAGE_CREATED",
+        payload=build_incident_message_webhook_payload(db_msg, source="api"),
+    )
+
     return db_msg
 
 
@@ -666,6 +673,11 @@ async def upload_incident_attachment(
             db_msg.id,
             db_inc.id,
         )
+    await dispatch_generic_webhook(
+        db,
+        event_type="INCIDENT_MESSAGE_CREATED",
+        payload=build_incident_message_webhook_payload(db_msg, source="api"),
+    )
     return db_msg
 
 @router.get("/incidents/{incident_id}/messages", response_model=list[IncidentMessageRead])
