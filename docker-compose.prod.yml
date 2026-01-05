@@ -52,8 +52,43 @@ services:
     container_name: securityvision-redis-prod
     restart: unless-stopped
 
+  minio:
+    image: minio/minio:latest
+    container_name: securityvision-minio-prod
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data-prod:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: securityvision-minio-init-prod
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_PUBLIC_BUCKETS: ${MINIO_PUBLIC_BUCKETS:-public}
+    volumes:
+      - ./docker/minio-init.sh:/init/minio-init.sh:ro
+    entrypoint: ["/bin/sh", "/init/minio-init.sh"]
+    restart: "no"
+
 volumes:
   pgdata_prod:
   media_prod:
   mosquitto_data_prod:
   mosquitto_log_prod:
+  minio-data-prod:
