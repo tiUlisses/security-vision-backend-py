@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging
 from app.services.chatwoot_client import ChatwootClient
+from app.services.webhook_dispatcher import dispatch_generic_webhook
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,34 @@ DEFAULT_SLA_BY_SEVERITY: dict[str, int] = {
     "MEDIUM": 240,
     "LOW": 1440,
 }
+
+
+def build_incident_webhook_payload(
+    incident: Incident,
+    *,
+    previous_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    def _to_iso(value: Optional[datetime]) -> Optional[str]:
+        return value.isoformat() if value else None
+
+    return {
+        "incident_id": incident.id,
+        "status": incident.status,
+        "previous_status": previous_status,
+        "severity": incident.severity,
+        "title": incident.title,
+        "device_id": incident.device_id,
+        "device_event_id": incident.device_event_id,
+        "assigned_group_id": incident.assigned_group_id,
+        "assigned_to_user_id": incident.assigned_to_user_id,
+        "kind": incident.kind,
+        "tenant": incident.tenant,
+        "sla_minutes": incident.sla_minutes,
+        "due_at": _to_iso(incident.due_at),
+        "created_at": _to_iso(incident.created_at),
+        "updated_at": _to_iso(incident.updated_at),
+        "closed_at": _to_iso(incident.closed_at),
+    }
 
 
 def compute_sla_fields(
@@ -151,6 +180,22 @@ async def apply_incident_update(
                 "[chatwoot] erro ao enviar mensagem de status do incidente %s",
                 updated.id,
             )
+
+        event_type = "INCIDENT_STATUS_CHANGED"
+        if (
+            old_status in TERMINAL_STATUSES
+            and new_status in ACTIVE_STATUSES
+        ):
+            event_type = "INCIDENT_REOPENED"
+
+        await dispatch_generic_webhook(
+            db,
+            event_type=event_type,
+            payload=build_incident_webhook_payload(
+                updated,
+                previous_status=old_status,
+            ),
+        )
 
     return updated
 

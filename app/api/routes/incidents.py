@@ -33,10 +33,12 @@ from app.services.incident_files import (
 
 from app.services.incidents import (
     apply_incident_update,
+    build_incident_webhook_payload,
     compute_sla_fields,
     infer_incident_kind_from_event,
     extract_media_from_event,
 )
+from app.services.webhook_dispatcher import dispatch_generic_webhook
 from app.api.deps import get_db_session, get_current_active_user
 from app.models.user import User
 
@@ -195,6 +197,11 @@ async def create_incident(
                 db_inc.id,
             )
 
+    await dispatch_generic_webhook(
+        db,
+        event_type="INCIDENT_CREATED",
+        payload=build_incident_webhook_payload(db_inc),
+    )
 
     return db_inc
 
@@ -252,6 +259,12 @@ async def create_incident_from_device_event(
         description=payload.description,
         severity=payload.severity,
         kind="CAMERA_ISSUE",
+    )
+
+    await dispatch_generic_webhook(
+        db,
+        event_type="INCIDENT_CREATED",
+        payload=build_incident_webhook_payload(db_inc),
     )
     return db_inc
 
@@ -586,6 +599,12 @@ async def create_incident_from_event(
                 "[chatwoot] erro ao enviar notificação Chatwoot para incidente %s",
                 db_inc.id,
             )
+
+    await dispatch_generic_webhook(
+        db,
+        event_type="INCIDENT_CREATED",
+        payload=build_incident_webhook_payload(db_inc),
+    )
 
     return db_inc
 
