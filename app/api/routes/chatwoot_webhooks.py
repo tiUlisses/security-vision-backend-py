@@ -15,6 +15,8 @@ from app.crud import incident as crud_incident
 from app.crud import incident_message as crud_incident_message
 from app.schemas import IncidentMessageCreate
 from app.services.incident_files import save_incident_image_from_url
+from app.services.webhook_dispatcher import dispatch_generic_webhook
+from app.services.incidents import build_incident_message_webhook_payload
 
 # ✅ para DE→PARA Chatwoot -> SV
 from app.models.user import User
@@ -374,8 +376,14 @@ async def chatwoot_webhook(
         data_to_save = msg_in.model_dump()
         data_to_save["incident_id"] = incident.id
 
-        await crud_incident_message.create(db, obj_in=data_to_save)
+        db_msg = await crud_incident_message.create(db, obj_in=data_to_save)
         logger.warning("[chatwoot-webhook] TEXTO salvo em incident_messages para incidente %s", incident.id)
+
+        await dispatch_generic_webhook(
+            db,
+            event_type="INCIDENT_MESSAGE_CREATED",
+            payload=build_incident_message_webhook_payload(db_msg, source="chatwoot"),
+        )
 
     # ----------------------
     # 2) Anexos
@@ -415,7 +423,13 @@ async def chatwoot_webhook(
                 "author_name": author_name,
             }
 
-            await crud_incident_message.create(db, obj_in=media_msg_data)
+            db_msg = await crud_incident_message.create(db, obj_in=media_msg_data)
+
+            await dispatch_generic_webhook(
+                db,
+                event_type="INCIDENT_MESSAGE_CREATED",
+                payload=build_incident_message_webhook_payload(db_msg, source="chatwoot"),
+            )
 
             logger.warning(
                 "[chatwoot-webhook] ANEXO salvo em incident_messages incidente=%s type=%s url=%s",
