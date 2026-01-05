@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     - settings.CAMBUS_MQTT_* para o cam-bus
     """
     FRONTEND_BASE_URL: Optional[AnyHttpUrl] = None
+    PUBLIC_BASE_URL: Optional[AnyHttpUrl] = None
+    MEDIA_BASE_URL: Optional[AnyHttpUrl] = None
     CHATWOOT_ENABLED: bool = False
     CHATWOOT_BASE_URL: AnyHttpUrl | None = None
     CHATWOOT_API_ACCESS_TOKEN: str | None = None
@@ -102,8 +104,11 @@ class Settings(BaseSettings):
     rtls_db_password: str = "rtls123"
     rtls_db_name: str = "rtls_db"
 
-    media_root: str = "media"
-    public_base_url: str = "http://localhost:8000"
+    media_root: str = Field(default="media", alias="MEDIA_ROOT")
+    public_base_url: str = Field(
+        default="http://localhost:8000",
+        alias="PUBLIC_BASE_URL",
+    )
 
     # Opcional: se você quiser setar DATABASE_URL direto no .env
     DATABASE_URL: Optional[str] = Field(
