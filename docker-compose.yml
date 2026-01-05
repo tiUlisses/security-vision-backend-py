@@ -11,9 +11,16 @@ services:
     environment:
       DB_WAIT: "1"
       RUN_MIGRATIONS: "0"
+      RTLS_DB_PASSWORD_FILE: /run/secrets/rtls_db_password
+      CHATWOOT_API_ACCESS_TOKEN_FILE: /run/secrets/chatwoot_api_access_token
+      SUPERADMIN_PASSWORD_FILE: /run/secrets/superadmin_password
     volumes:
       - ./:/app
       - media:/app/media
+    secrets:
+      - rtls_db_password
+      - chatwoot_api_access_token
+      - superadmin_password
     depends_on:
       db:
         condition: service_healthy
@@ -29,11 +36,13 @@ services:
     environment:
       POSTGRES_DB: rtls_db
       POSTGRES_USER: rtls
-      POSTGRES_PASSWORD: rtls123
+      POSTGRES_PASSWORD_FILE: /run/secrets/rtls_db_password
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    secrets:
+      - rtls_db_password
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -74,3 +83,11 @@ volumes:
   media:
   mosquitto-data:
   mosquitto-log:
+
+secrets:
+  rtls_db_password:
+    file: ./secrets/rtls_db_password
+  chatwoot_api_access_token:
+    file: ./secrets/chatwoot_api_access_token
+  superadmin_password:
+    file: ./secrets/superadmin_password

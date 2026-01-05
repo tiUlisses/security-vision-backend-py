@@ -1,8 +1,26 @@
 # app/core/config.py
 from typing import Optional
 import os
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AnyHttpUrl
+
+
+def _load_secret_file(env_var: str, file_var: str) -> None:
+    file_path = os.getenv(file_var)
+    if not file_path or os.getenv(env_var):
+        return
+
+    path = Path(file_path)
+    if not path.is_file():
+        return
+
+    os.environ[env_var] = path.read_text().strip()
+
+
+_load_secret_file("RTLS_DB_PASSWORD", "RTLS_DB_PASSWORD_FILE")
+_load_secret_file("CHATWOOT_API_ACCESS_TOKEN", "CHATWOOT_API_ACCESS_TOKEN_FILE")
+_load_secret_file("SUPERADMIN_PASSWORD", "SUPERADMIN_PASSWORD_FILE")
 
 
 class Settings(BaseSettings):
