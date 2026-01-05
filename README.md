@@ -107,6 +107,14 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `DATABASE_URL` *(prioritário)*
 - `RTLS_DB_HOST`, `RTLS_DB_PORT`, `RTLS_DB_USER`, `RTLS_DB_PASSWORD`, `RTLS_DB_NAME`
 
+### Sessões de presença
+
+- `PRESENCE_SESSION_GAP_SECONDS` *(opcional, default: 15s)*: define o intervalo máximo entre
+  `collection_logs` consecutivos para que continuem na mesma sessão.
+
+A view `presence_sessions` agrega os registros de `collection_logs` por `(tag_id, device_id)`
+em sessões contínuas usando esse gap, expondo início, fim, duração e quantidade de amostras.
+
 ### MQTT (RTLS Gateways)
 
 ```
