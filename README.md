@@ -92,6 +92,12 @@ SUPERADMIN_NAME=System Admin
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+### 5) Subir a API (sem dev mode / sem reload)
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
 ---
 
 ## ✅ Variáveis essenciais (dev)
@@ -172,15 +178,29 @@ SUPERADMIN_NAME=System Admin
 
 ---
 
-## ✅ Docker Compose (detalhes)
+## ✅ Docker (com e sem dev mode)
 
-Usa `env/.env.dev` por padrão.
+### Desenvolvimento (com hot reload)
+
+Usa o `docker-compose.yml` + `env/.env.dev` e roda o Uvicorn com `--reload`.
 
 ```bash
 docker compose up --build
 ```
 
-Se quiser expor para outro banco, altere no `.env`:
+### Produção (sem dev mode)
+
+Usa o `docker-compose.prod.yml` + `env/.env.prod` com target `prod` (sem hot reload).
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+> Por padrão, o `docker-compose.prod.yml` expõe `8001:8000`.
+
+### Usando um banco externo
+
+Se quiser usar outro Postgres (fora do compose), ajuste `.env`/`env/.env.dev`:
 
 ```
 DATABASE_URL=postgresql://rtls:rtls123@localhost:5432/rtls_db
@@ -210,17 +230,42 @@ alembic upgrade head
 
 ---
 
-## ✅ Estrutura principal
+## ✅ Estrutura do projeto
 
 ```
-app/
-  api/
-  core/
-  crud/
-  db/
-  models/
-  schemas/
-  services/
+security-vision-backend-py/
+├── alembic/
+│   ├── versions/
+│   ├── env.py
+│   └── script.py.mako
+├── app/
+│   ├── api/
+│   ├── core/
+│   ├── crud/
+│   ├── db/
+│   ├── models/
+│   ├── schemas/
+│   ├── services/
+│   ├── utils/
+│   └── main.py
+├── docker/
+│   ├── entrypoint.sh
+│   ├── mosquitto.conf
+│   └── wait_for_db.py
+├── env/
+│   ├── .env.dev
+│   └── .env.prod
+├── media/
+├── scripts/
+├── testes/
+├── .env
+├── docker-compose.yml
+├── docker-compose.dev.yml
+├── docker-compose.prod.yml
+├── Dockerfile
+├── alembic.ini
+├── pyproject.toml
+└── requirements.txt
 ```
 
 ---
