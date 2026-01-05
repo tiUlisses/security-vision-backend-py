@@ -10,7 +10,7 @@ services:
       - env/.env.dev
     environment:
       DB_WAIT: "1"
-      RUN_MIGRATIONS: "1"
+      RUN_MIGRATIONS: "0"
     volumes:
       - ./:/app
       - media_dev:/app/media
