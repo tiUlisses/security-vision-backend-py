@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     CHATWOOT_WEBHOOK_TOKEN: str | None = os.getenv("CHATWOOT_WEBHOOK_TOKEN")
     CHATWOOT_INCIDENT_BASE_URL: AnyHttpUrl | None = None
     POSITION_STALE_THRESHOLD_SECONDS: int = 15
+    PRESENCE_SESSION_GAP_SECONDS: int = Field(
+        default=15,
+        description=(
+            "Janela máxima (em segundos) entre logs consecutivos para manter a mesma "
+            "sessão de presença."
+        ),
+    )
     # ==================================================================
 
     # Config Pydantic v2
