@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, literal, or_, select, text, union_all
+from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
@@ -37,6 +38,7 @@ from app.models.floor_plan import FloorPlan
 from app.models.person import Person
 from app.models.person_group import PersonGroup, person_group_memberships
 from app.models.presence_session import PresenceSession
+from app.models.presence_transition import PresenceTransition
 from app.models.tag import Tag
 from app.schemas.gateway_report import (
     GatewayTimeOfDayBucket,
@@ -56,6 +58,7 @@ from app.schemas.person_report import (
     PersonDwellByDevice,
     PersonGroupPresenceSummary,
     PersonHourByGatewayBucket,
+    PresenceTransitionReportItem,
     PersonPresenceSummary,
     PersonTimeDistributionBucket,
     PersonTimeDistributionCalendar,
@@ -312,6 +315,100 @@ async def list_dwell_sessions(
         to_ts=window.to_ts,
     )
     return sessions
+
+
+@router.get("/presence-transitions", response_model=List[PresenceTransitionReportItem])
+async def list_presence_transitions(
+    skip: int = 0,
+    limit: int = Query(default=500, ge=1, le=5000),
+    person_id: Optional[int] = Query(default=None),
+    tag_id: Optional[int] = Query(default=None),
+    device_id: Optional[int] = Query(default=None),
+    from_device_id: Optional[int] = Query(default=None),
+    to_device_id: Optional[int] = Query(default=None),
+    from_ts: Optional[datetime] = Query(default=None),
+    to_ts: Optional[datetime] = Query(default=None),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Lista transições entre sessões consecutivas de uma TAG."""
+    window = _coerce_window(from_ts=from_ts, to_ts=to_ts, default_hours=24 * 7)
+
+    from_device = aliased(Device)
+    to_device = aliased(Device)
+
+    conditions = []
+    if window.from_ts is not None and window.to_ts is not None:
+        conditions.append(
+            and_(
+                PresenceTransition.transition_start_at <= window.to_ts,
+                PresenceTransition.transition_end_at >= window.from_ts,
+            )
+        )
+    elif window.from_ts is not None:
+        conditions.append(PresenceTransition.transition_end_at >= window.from_ts)
+    elif window.to_ts is not None:
+        conditions.append(PresenceTransition.transition_start_at <= window.to_ts)
+
+    if person_id is not None:
+        conditions.append(Person.id == person_id)
+    if tag_id is not None:
+        conditions.append(PresenceTransition.tag_id == tag_id)
+    if device_id is not None:
+        conditions.append(
+            or_(
+                PresenceTransition.from_device_id == device_id,
+                PresenceTransition.to_device_id == device_id,
+            )
+        )
+    if from_device_id is not None:
+        conditions.append(PresenceTransition.from_device_id == from_device_id)
+    if to_device_id is not None:
+        conditions.append(PresenceTransition.to_device_id == to_device_id)
+
+    stmt = (
+        select(
+            PresenceTransition.tag_id,
+            Tag.label.label("tag_label"),
+            Tag.person_id.label("person_id"),
+            Person.full_name.label("person_full_name"),
+            PresenceTransition.from_device_id,
+            from_device.name.label("from_device_name"),
+            PresenceTransition.to_device_id,
+            to_device.name.label("to_device_name"),
+            PresenceTransition.transition_start_at,
+            PresenceTransition.transition_end_at,
+            PresenceTransition.transition_seconds,
+        )
+        .select_from(PresenceTransition)
+        .join(Tag, Tag.id == PresenceTransition.tag_id, isouter=True)
+        .join(Person, Person.id == Tag.person_id, isouter=True)
+        .join(from_device, from_device.id == PresenceTransition.from_device_id, isouter=True)
+        .join(to_device, to_device.id == PresenceTransition.to_device_id, isouter=True)
+        .where(*conditions)
+        .order_by(PresenceTransition.transition_start_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+
+    res = await db.execute(stmt)
+    rows = res.all()
+
+    return [
+        PresenceTransitionReportItem(
+            tag_id=r.tag_id,
+            tag_label=r.tag_label,
+            person_id=r.person_id,
+            person_full_name=r.person_full_name,
+            from_device_id=r.from_device_id,
+            from_device_name=r.from_device_name,
+            to_device_id=r.to_device_id,
+            to_device_name=r.to_device_name,
+            transition_start_at=r.transition_start_at,
+            transition_end_at=r.transition_end_at,
+            transition_seconds=int(r.transition_seconds or 0),
+        )
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
