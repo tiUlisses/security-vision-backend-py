@@ -141,6 +141,11 @@ async def publish_camera_info_from_device(
         "enabled": True,
         "shard": device.shard or settings.CAMBUS_DEFAULT_SHARD,
         "analytics": analytics,
+        "rtsp_url": device.rtsp_url or "",
+        "proxy_path": device.proxy_path or "",
+        "central_path": device.central_path or "",
+        "record_retention_minutes": device.record_retention_minutes,
+        "central_media_mtx_ip": device.central_media_mtx_ip or "",
     }
 
     # 1) Publica /info no MQTT
