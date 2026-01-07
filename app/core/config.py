@@ -162,6 +162,14 @@ class Settings(BaseSettings):
     CAMBUS_MQTT_BASE_TOPIC: str = "rtls/cameras"
     CAMBUS_TENANT: str = "default"
     CAMBUS_DEFAULT_SHARD: str = "shard-1"
+    CAMBUS_UPLINK_SRT_PORT: int = Field(
+        default=8890,
+        description="Porta SRT padrão usada ao iniciar uplink de câmeras.",
+    )
+    CAMBUS_UPLINK_TTL_SECONDS: int = Field(
+        default=300,
+        description="TTL (em segundos) padrão para mensagens de uplink de câmeras.",
+    )
 
     # ------------------------------------------------------------------
     # MQTT do RTLS (gateways BLE, etc.)
