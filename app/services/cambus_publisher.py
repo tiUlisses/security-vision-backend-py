@@ -187,13 +187,27 @@ async def publish_camera_uplink_action_from_device(
     device: Device,
     action: str,
 ) -> str:
+    return await publish_camera_uplink_command(db, device, action)
+
+
+async def publish_camera_uplink_command(
+    db: AsyncSession,
+    device: Device,
+    action: str,
+) -> str:
+    """
+    Publica comando uplink start/stop da câmera no MQTT.
+
+    Tópico:
+      <CAMBUS_UPLINK_BASE_TOPIC>/<tenant>/<building>/<floor>/camera/<code>/uplink/<action>
+    """
     if getattr(device, "type", None) != "CAMERA":
         raise ValueError("Device não é do tipo CAMERA.")
 
     if action not in {"start", "stop"}:
         raise ValueError(f"Ação inválida para uplink: {action}")
 
-    base = settings.CAMBUS_MQTT_BASE_TOPIC.rstrip("/")
+    base = settings.CAMBUS_UPLINK_BASE_TOPIC.rstrip("/")
     tenant = _slug(settings.CAMBUS_TENANT, "default")
 
     building_slug, floor_slug = await _resolve_building_floor(db, device)
@@ -212,6 +226,7 @@ async def publish_camera_uplink_action_from_device(
         "ttlSeconds": settings.CAMBUS_UPLINK_TTL_SECONDS,
     }
 
+    # retain=False por padrão, já que o proxy não espera comandos retidos.
     await _mqtt_publish_json(topic, payload, retain=False, qos=1)
 
     return topic
