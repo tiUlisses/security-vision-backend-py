@@ -186,7 +186,7 @@ async def publish_camera_uplink_action_from_device(
     db: AsyncSession,
     device: Device,
     action: str,
-) -> str:
+) -> tuple[str, dict]:
     return await publish_camera_uplink_command(db, device, action)
 
 
@@ -194,7 +194,7 @@ async def publish_camera_uplink_command(
     db: AsyncSession,
     device: Device,
     action: str,
-) -> str:
+) -> tuple[str, dict]:
     """
     Publica comando uplink start/stop da câmera no MQTT.
 
@@ -229,7 +229,7 @@ async def publish_camera_uplink_command(
     # retain=False por padrão, já que o proxy não espera comandos retidos.
     await _mqtt_publish_json(topic, payload, retain=False, qos=1)
 
-    return topic
+    return topic, payload
 
 async def disable_cambus_topics_for_device(
     db: AsyncSession,

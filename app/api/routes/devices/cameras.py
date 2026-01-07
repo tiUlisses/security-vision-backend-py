@@ -204,11 +204,12 @@ async def start_camera_uplink(
 
     _validate_camera_uplink_fields(db_cam)
 
-    topic = await publish_camera_uplink_action_from_device(db, db_cam, "start")
+    topic, payload = await publish_camera_uplink_action_from_device(db, db_cam, "start")
 
     return {
         "status": "queued",
         "topic": topic,
+        "payload": payload,
         "action": "start",
     }
 
@@ -224,11 +225,12 @@ async def stop_camera_uplink(
 
     _validate_camera_uplink_fields(db_cam)
 
-    topic = await publish_camera_uplink_action_from_device(db, db_cam, "stop")
+    topic, payload = await publish_camera_uplink_action_from_device(db, db_cam, "stop")
 
     return {
         "status": "queued",
         "topic": topic,
+        "payload": payload,
         "action": "stop",
     }
 
@@ -298,4 +300,3 @@ async def update_camera(
     await publish_camera_info_from_device(db, updated)
 
     return updated
-
