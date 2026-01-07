@@ -181,6 +181,41 @@ async def publish_camera_info_from_device(
 
     await db.commit()
 
+
+async def publish_camera_uplink_action_from_device(
+    db: AsyncSession,
+    device: Device,
+    action: str,
+) -> str:
+    if getattr(device, "type", None) != "CAMERA":
+        raise ValueError("Device não é do tipo CAMERA.")
+
+    if action not in {"start", "stop"}:
+        raise ValueError(f"Ação inválida para uplink: {action}")
+
+    base = settings.CAMBUS_MQTT_BASE_TOPIC.rstrip("/")
+    tenant = _slug(settings.CAMBUS_TENANT, "default")
+
+    building_slug, floor_slug = await _resolve_building_floor(db, device)
+
+    cam_id = (device.code or f"device{device.id}").strip()
+    cam_id = _slug(cam_id, f"device{device.id}")
+
+    topic = f"{base}/{tenant}/{building_slug}/{floor_slug}/camera/{cam_id}/uplink/{action}"
+
+    payload = {
+        "cameraId": cam_id,
+        "proxyPath": device.proxy_path,
+        "centralPath": device.central_path,
+        "centralHost": device.central_media_mtx_ip,
+        "centralSrtPort": settings.CAMBUS_UPLINK_SRT_PORT,
+        "ttlSeconds": settings.CAMBUS_UPLINK_TTL_SECONDS,
+    }
+
+    await _mqtt_publish_json(topic, payload, retain=False, qos=1)
+
+    return topic
+
 async def disable_cambus_topics_for_device(
     db: AsyncSession,
     device_id: int,

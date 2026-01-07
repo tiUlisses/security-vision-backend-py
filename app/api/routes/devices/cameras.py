@@ -23,6 +23,7 @@ from app.services.webhook_dispatcher import dispatch_generic_webhook
 from app.services.cambus_publisher import (
     publish_camera_info_from_device,
     disable_cambus_topics_for_device,
+    publish_camera_uplink_action_from_device,
 )
 from .base import _build_device_status_list
 
@@ -174,6 +175,63 @@ async def list_device_events(
     )
     return events
 
+
+def _validate_camera_uplink_fields(device) -> None:
+    missing_fields = [
+        field_name
+        for field_name in ("proxy_path", "central_path", "central_media_mtx_ip")
+        if not getattr(device, field_name, None)
+    ]
+    if missing_fields:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Campos obrigatórios ausentes para uplink: "
+                + ", ".join(missing_fields)
+                + "."
+            ),
+        )
+
+
+@router.post("/{camera_id}/uplink/start")
+async def start_camera_uplink(
+    camera_id: int,
+    db: AsyncSession = Depends(get_db_session),
+):
+    db_cam = await crud_device.get(db, id=camera_id)
+    if not db_cam or db_cam.type != "CAMERA":
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    _validate_camera_uplink_fields(db_cam)
+
+    topic = await publish_camera_uplink_action_from_device(db, db_cam, "start")
+
+    return {
+        "status": "queued",
+        "topic": topic,
+        "action": "start",
+    }
+
+
+@router.post("/{camera_id}/uplink/stop")
+async def stop_camera_uplink(
+    camera_id: int,
+    db: AsyncSession = Depends(get_db_session),
+):
+    db_cam = await crud_device.get(db, id=camera_id)
+    if not db_cam or db_cam.type != "CAMERA":
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    _validate_camera_uplink_fields(db_cam)
+
+    topic = await publish_camera_uplink_action_from_device(db, db_cam, "stop")
+
+    return {
+        "status": "queued",
+        "topic": topic,
+        "action": "stop",
+    }
+
 @router.put("/{camera_id}", response_model=DeviceRead)
 async def update_camera(
     camera_id: int,
@@ -240,5 +298,4 @@ async def update_camera(
     await publish_camera_info_from_device(db, updated)
 
     return updated
-
 
