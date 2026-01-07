@@ -160,6 +160,10 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     CAMBUS_MQTT_ENABLED: bool = True
     CAMBUS_MQTT_BASE_TOPIC: str = "rtls/cameras"
+    CAMBUS_UPLINK_BASE_TOPIC: str = Field(
+        default="security-vision/cameras",
+        description="Base do tópico para comandos uplink (start/stop) enviados ao cam-bus.",
+    )
     CAMBUS_TENANT: str = "default"
     CAMBUS_DEFAULT_SHARD: str = "shard-1"
     CAMBUS_UPLINK_SRT_PORT: int = Field(
