@@ -72,6 +72,11 @@ class Device(Base):
     port: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     password: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    rtsp_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    proxy_path: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    central_path: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    record_retention_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    central_media_mtx_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # NOVO: fabricante / modelo / shard do cam-bus
     manufacturer: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)

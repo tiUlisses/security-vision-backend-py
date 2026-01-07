@@ -42,6 +42,11 @@ class DeviceBase(BaseModel):
     ip_address: Optional[str] = Field(None, max_length=64)
     port: Optional[int] = None
     username: Optional[str] = Field(None, max_length=128)
+    rtsp_url: Optional[str] = Field(None, max_length=512)
+    proxy_path: Optional[str] = Field(None, max_length=255)
+    central_path: Optional[str] = Field(None, max_length=255)
+    record_retention_minutes: Optional[int] = None
+    central_media_mtx_ip: Optional[str] = Field(None, max_length=64)
 
 class DeviceCreate(DeviceBase):
     # opcional, usado internamente para setar last_seen_at
@@ -78,6 +83,11 @@ class DeviceUpdate(BaseModel):
     port: Optional[int] = None
     username: Optional[str] = Field(None, max_length=128)
     password: Optional[str] = Field(None, max_length=128)
+    rtsp_url: Optional[str] = Field(None, max_length=512)
+    proxy_path: Optional[str] = Field(None, max_length=255)
+    central_path: Optional[str] = Field(None, max_length=255)
+    record_retention_minutes: Optional[int] = None
+    central_media_mtx_ip: Optional[str] = Field(None, max_length=64)
 
     # Status
     last_seen_at: Optional[datetime] = None
