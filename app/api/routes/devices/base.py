@@ -3,7 +3,9 @@ from datetime import datetime, timezone
 from typing import List
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.services.alert_engine import handle_gateway_status_transition
 from app.services.webhook_dispatcher import dispatch_generic_webhook
@@ -24,6 +26,8 @@ from app.services.access_control_publisher import (
 from app.core.config import settings
 from app.crud import device as crud_device
 from app.crud import device_topic as crud_device_topic
+from app.models.device import Device
+from app.models.floor import Floor
 from app.schemas import (
     DeviceCreate,
     DeviceRead,
@@ -52,6 +56,16 @@ def _compute_is_online(last_seen_at: datetime | None) -> bool:
 
     delta = now - last_seen_at
     return delta.total_seconds() <= settings.DEVICE_OFFLINE_THRESHOLD_SECONDS
+
+
+async def _load_device_for_access_control(db: AsyncSession, device_id: int) -> Device | None:
+    stmt = (
+        select(Device)
+        .where(Device.id == device_id)
+        .options(selectinload(Device.floor).selectinload(Floor.locations))
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
 
 
 async def _build_device_status_list(
@@ -154,7 +168,8 @@ async def create_device(
         )
 
     try:
-        await publish_access_control_device_created(device)
+        device_for_publish = await _load_device_for_access_control(db, device.id)
+        await publish_access_control_device_created(device_for_publish or device)
     except Exception as exc:
         logger.exception(
             "[devices] erro ao publicar evento access-control (create) device_id=%s: %s",
@@ -267,7 +282,8 @@ async def update_device(
             )
 
     try:
-        await publish_access_control_device_updated(updated)
+        device_for_publish = await _load_device_for_access_control(db, updated.id)
+        await publish_access_control_device_updated(device_for_publish or updated)
     except Exception as exc:
         logger.exception(
             "[devices] erro ao publicar evento access-control (update) device_id=%s: %s",

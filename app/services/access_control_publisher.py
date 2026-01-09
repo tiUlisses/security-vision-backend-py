@@ -7,6 +7,7 @@ from datetime import datetime, time
 from typing import Any
 
 from asyncio_mqtt import Client as MQTTClient
+from sqlalchemy import inspect
 
 from app.core.config import settings
 from app.models.device import Device
@@ -72,11 +73,18 @@ def _parse_avaliable_days(value: str | list[int] | None) -> list[int]:
 def _resolve_device_location_id(device: Device) -> int | None:
     if device.location_id is not None:
         return device.location_id
+    device_state = inspect(device)
+    if "floor" in device_state.unloaded:
+        return None
     floor = getattr(device, "floor", None)
-    if floor and getattr(floor, "locations", None):
-        for location in floor.locations:
-            if location and getattr(location, "id", None) is not None:
-                return location.id
+    if not floor:
+        return None
+    floor_state = inspect(floor)
+    if "locations" in floor_state.unloaded:
+        return None
+    for location in getattr(floor, "locations", []) or []:
+        if location and getattr(location, "id", None) is not None:
+            return location.id
     return None
 
 
