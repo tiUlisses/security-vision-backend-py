@@ -17,6 +17,7 @@ from app.models.webhook_subscription import WebhookSubscription  # noqa
 from app.models.alert_event import AlertEvent  # noqa
 from app.models.user import User
 from app.models.incident_attachment import IncidentAttachment
+from app.models.location import Location, LocationRule, location_floors  # noqa
 
 __all__ = [
     "Base",
@@ -39,4 +40,7 @@ __all__ = [
     "IncidentMessage",
     "User",
     "IncidentAttachment",
+    "Location",
+    "LocationRule",
+    "location_floors",
 ]
