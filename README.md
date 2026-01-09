@@ -74,6 +74,11 @@ CAMBUS_DEFAULT_SHARD=shard-1
 CAMBUS_UPLINK_SRT_PORT=8890
 CAMBUS_UPLINK_TTL_SECONDS=300
 
+ACCESS_CONTROL_MQTT_ENABLED=true
+ACCESS_CONTROL_MQTT_BASE_TOPIC=security-vision/access-control
+ACCESS_CONTROL_MQTT_TOPIC=security-vision/access-control/locations
+ACCESS_CONTROL_TENANT=default
+
 CHATWOOT_ENABLED=true
 CHATWOOT_BASE_URL=https://chat.urtechsolucoes.com
 CHATWOOT_API_ACCESS_TOKEN=NyEu794ta4nAbM6krRa2Rari
@@ -177,6 +182,17 @@ Tópicos esperados:
 - `rtls/cameras/<tenant>/<building>/collector/status`
 
 > O backend detecta eventos do tipo `faceCapture` e cria incidentes com mídias vinculadas.
+
+### Access-Control / Vision-Controller
+
+```
+ACCESS_CONTROL_MQTT_ENABLED=true
+ACCESS_CONTROL_MQTT_BASE_TOPIC=security-vision/access-control
+ACCESS_CONTROL_MQTT_TOPIC=security-vision/access-control/locations
+ACCESS_CONTROL_TENANT=default
+```
+
+> Use `ACCESS_CONTROL_MQTT_ENABLED` para habilitar/desabilitar os publishers de access-control.
 
 ---
 
