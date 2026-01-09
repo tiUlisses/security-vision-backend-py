@@ -12,6 +12,7 @@ from app.db.base_class import Base
 if TYPE_CHECKING:
     from app.models.tag import Tag
     from app.models.person_group import PersonGroup
+    from app.models.device_user import DeviceUser
 
 class Person(Base):
     __tablename__ = "people"
@@ -41,4 +42,8 @@ class Person(Base):
     groups: Mapped[List["PersonGroup"]] = relationship(
         secondary="person_group_memberships",
         back_populates="people",
+    )
+    device_users: Mapped[List["DeviceUser"]] = relationship(
+        back_populates="person",
+        cascade="all, delete-orphan",
     )

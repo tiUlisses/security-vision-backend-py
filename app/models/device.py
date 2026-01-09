@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from app.models.device_event import DeviceEvent  # 👈 novo
     from app.models.incident import Incident
     from app.models.location import Location
+    from app.models.device_user import DeviceUser
 
 
 class Device(Base):
@@ -163,4 +164,9 @@ class Device(Base):
         secondary="camera_group_devices",
         back_populates="devices",
         lazy="selectin",
+    )
+
+    device_users: Mapped[List["DeviceUser"]] = relationship(
+        back_populates="device",
+        cascade="all, delete-orphan",
     )

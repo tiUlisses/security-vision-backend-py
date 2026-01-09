@@ -18,6 +18,7 @@ from app.api.routes import chatwoot_webhooks as integrations_chatwoot
 from app.api.routes import support_groups
 from app.api.routes import users
 from app.api.routes import locations
+from app.api.routes import device_users
 # testing 
 __all__ = [
     "buildings",
@@ -40,4 +41,5 @@ __all__ = [
     "support_groups",
     "users",
     "locations",
+    "device_users",
 ]

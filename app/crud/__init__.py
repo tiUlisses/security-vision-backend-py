@@ -19,6 +19,7 @@ from app.crud.incident_rule import incident_rule
 from app.crud.support_group import support_group
 from app.crud.location import location
 from app.crud.location_rule import location_rule
+from app.crud.device_user import device_user
 
 __all__ = [
     "building",
@@ -42,4 +43,5 @@ __all__ = [
     "incident_rule",
     "location",
     "location_rule",
+    "device_user",
 ]
