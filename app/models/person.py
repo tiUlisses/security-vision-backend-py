@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional, TYPE_CHECKING
 
-from sqlalchemy import Boolean, String, text
+from sqlalchemy import Boolean, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base_class import Base
@@ -20,6 +20,8 @@ class Person(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     document_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    user_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
     notes: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
 
