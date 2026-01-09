@@ -176,6 +176,12 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Access Control (controle de acesso via MQTT)
+    # ------------------------------------------------------------------
+    ACCESS_CONTROL_MQTT_BASE_TOPIC: str = "security-vision/access-control"
+    ACCESS_CONTROL_TENANT: str = "default"
+
+    # ------------------------------------------------------------------
     # MQTT do RTLS (gateways BLE, etc.)
     # (lê variáveis do tipo RTLS_MQTT_* do .env automaticamente)
     # ------------------------------------------------------------------
