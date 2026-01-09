@@ -21,6 +21,7 @@ from app.api.routes import (
     support_groups,
     chatwoot_webhooks,
     users,
+    locations,
 )
 
 # 👉 novo import, vindo do pacote app.api.routes.devices
@@ -52,6 +53,11 @@ api_router.include_router(
     floor_plans.router,
     prefix="/floor-plans",
     tags=["floor_plans"],
+)
+api_router.include_router(
+    locations.router,
+    prefix="/locations",
+    tags=["locations"],
 )
 
 # 👉 aqui usamos o router combinado (base + gateways + cameras)

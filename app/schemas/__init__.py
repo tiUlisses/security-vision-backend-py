@@ -59,7 +59,16 @@ from app.schemas.collection_log import (
     CollectionLogRead,
 )
 
-from app.schemas.location import PersonCurrentLocation, DeviceCurrentOccupancy
+from app.schemas.location import (
+    PersonCurrentLocation,
+    DeviceCurrentOccupancy,
+    LocationCreate,
+    LocationRead,
+    LocationUpdate,
+    LocationRuleCreate,
+    LocationRuleRead,
+    LocationRuleUpdate,
+)
 from app.schemas.device_event import DeviceEventRead, DeviceEventCreate
 from app.schemas.alert_event import AlertEventCreate, AlertEventUpdate, AlertEventRead
 
@@ -171,6 +180,12 @@ __all__ = [
     "CollectionLogRead",
     "PersonCurrentLocation",
     "DeviceCurrentOccupancy",
+    "LocationCreate",
+    "LocationRead",
+    "LocationUpdate",
+    "LocationRuleCreate",
+    "LocationRuleRead",
+    "LocationRuleUpdate",
     "DeviceStatusRead",
     "DevicePositionUpdate",
     "AlertEventRead",

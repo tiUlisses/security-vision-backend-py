@@ -11,6 +11,7 @@ from app.db.base_class import Base
 if TYPE_CHECKING:
     from app.models.building import Building
     from app.models.floor_plan import FloorPlan
+    from app.models.location import Location
 
 
 class Floor(Base):
@@ -41,4 +42,9 @@ class Floor(Base):
     floor_plans: Mapped[List["FloorPlan"]] = relationship(
         back_populates="floor",
         cascade="all, delete-orphan",
+    )
+    locations: Mapped[List["Location"]] = relationship(
+        "Location",
+        secondary="location_floors",
+        back_populates="floors",
     )

@@ -17,6 +17,7 @@ from app.models.alert_event import AlertEvent
 from app.models.device_event import DeviceEvent
 from app.models.incident_message import IncidentMessage
 from app.models.user import User
+from app.models.location import Location, LocationRule, location_floors
 from .incident_rule import IncidentRule
 from .incident import Incident
 from .support_group import SupportGroup
@@ -41,6 +42,9 @@ __all__ = [
     "DeviceEvent",
     "IncidentMessage",
     "User",
+    "Location",
+    "LocationRule",
+    "location_floors",
     "IncidentRule",
     "Incident",
     "SupportGroup",
