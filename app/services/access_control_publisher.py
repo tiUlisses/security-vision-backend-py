@@ -41,6 +41,63 @@ def _serialize_time(value: time | None) -> str | None:
     return value.isoformat()
 
 
+def _normalize_location_status(status: str | None) -> bool:
+    return (status or "").upper() == "ACTIVE"
+
+
+def _parse_avaliable_days(value: str | list[int] | None) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        parsed = []
+        for item in value:
+            try:
+                parsed.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return parsed
+    if isinstance(value, str):
+        parsed = []
+        for part in value.split(","):
+            trimmed = part.strip()
+            if not trimmed:
+                continue
+            try:
+                parsed.append(int(trimmed))
+            except ValueError:
+                continue
+        return parsed
+    return []
+
+
+def _resolve_cpf(user: User) -> str | None:
+    person = getattr(user, "person", None)
+    if person and getattr(person, "document_id", None):
+        return person.document_id
+    document_id = getattr(user, "document_id", None)
+    if document_id:
+        return document_id
+    cpf = getattr(user, "cpf", None)
+    if cpf:
+        return cpf
+    return None
+
+
+def _resolve_phone(user: User) -> str | None:
+    for attr in ("phone", "phone_number", "mobile", "mobile_phone"):
+        value = getattr(user, attr, None)
+        if value:
+            return value
+    return None
+
+
+def _resolve_user_type(user: User) -> str:
+    role = getattr(user, "role", None)
+    if role:
+        return role
+    return "UNKNOWN"
+
+
 def _access_control_topic(*segments: str) -> str:
     base = settings.ACCESS_CONTROL_MQTT_BASE_TOPIC.rstrip("/")
     tenant = _slug(settings.ACCESS_CONTROL_TENANT, "default")
@@ -70,7 +127,7 @@ def _location_payload(location: Location) -> dict[str, Any]:
         "id": location.id,
         "name": location.name,
         "description": location.description,
-        "status": location.status,
+        "status": _normalize_location_status(location.status),
         "floor_ids": [floor.id for floor in getattr(location, "floors", [])],
         "created_at": _serialize_datetime(location.created_at),
         "updated_at": _serialize_datetime(location.updated_at),
@@ -82,7 +139,7 @@ def _location_rule_payload(rule: LocationRule) -> dict[str, Any]:
         "id": rule.id,
         "location_id": rule.location_id,
         "capacity": rule.capacity,
-        "avaliable_days": rule.avaliable_days,
+        "avaliable_days": _parse_avaliable_days(rule.avaliable_days),
         "start_time": _serialize_time(rule.start_time),
         "end_time": _serialize_time(rule.end_time),
         "status": rule.status,
@@ -93,11 +150,24 @@ def _location_rule_payload(rule: LocationRule) -> dict[str, Any]:
 
 
 def _user_payload(user: User) -> dict[str, Any]:
+    cpf = _resolve_cpf(user)
+    phone = _resolve_phone(user)
+    user_type = _resolve_user_type(user)
+    if cpf is None:
+        logger.warning("[access-control] user %s sem cpf definido; usando vazio no payload", user.id)
+    if phone is None:
+        logger.warning("[access-control] user %s sem phone definido; usando vazio no payload", user.id)
+    if user_type == "UNKNOWN":
+        logger.warning("[access-control] user %s sem role definido; user_type=UNKNOWN", user.id)
+
     return {
         "id": user.id,
         "email": user.email,
         "full_name": user.full_name,
         "role": user.role,
+        "user_type": user_type,
+        "cpf": cpf or "",
+        "phone": phone or "",
         "is_active": user.is_active,
         "created_at": _serialize_datetime(user.created_at),
         "updated_at": _serialize_datetime(user.updated_at),
