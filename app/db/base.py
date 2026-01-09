@@ -18,6 +18,7 @@ from app.models.alert_event import AlertEvent  # noqa
 from app.models.user import User
 from app.models.incident_attachment import IncidentAttachment
 from app.models.location import Location, LocationRule, location_floors  # noqa
+from app.models.device_user import DeviceUser  # noqa
 
 __all__ = [
     "Base",
@@ -43,4 +44,5 @@ __all__ = [
     "Location",
     "LocationRule",
     "location_floors",
+    "DeviceUser",
 ]

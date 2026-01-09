@@ -10,6 +10,7 @@ from asyncio_mqtt import Client as MQTTClient
 
 from app.core.config import settings
 from app.models.device import Device
+from app.models.device_user import DeviceUser
 from app.models.location import Location, LocationRule
 from app.models.person import Person
 
@@ -284,16 +285,17 @@ async def publish_access_control_device_deleted() -> tuple[str, dict[str, Any]]:
 
 
 async def publish_access_control_device_user_created(
-    device_id: int,
-    person_id: int,
+    device_user: DeviceUser,
 ) -> tuple[str, dict[str, Any]]:
     topic = _access_control_topic("device-users", "created")
     payload = _build_access_control_envelope(
         "created",
         "device_user",
         {
-            "device_id": device_id,
-            "person_id": person_id,
+            "device_id": device_user.device_id,
+            "person_id": device_user.person_id,
+            "deviceUserId": device_user.device_user_id,
+            "status": device_user.status,
         },
     )
     await _mqtt_publish_json(topic, payload, retain=True, qos=1)
@@ -301,16 +303,17 @@ async def publish_access_control_device_user_created(
 
 
 async def publish_access_control_device_user_updated(
-    device_id: int,
-    person_id: int,
+    device_user: DeviceUser,
 ) -> tuple[str, dict[str, Any]]:
     topic = _access_control_topic("device-users", "updated")
     payload = _build_access_control_envelope(
         "updated",
         "device_user",
         {
-            "device_id": device_id,
-            "person_id": person_id,
+            "device_id": device_user.device_id,
+            "person_id": device_user.person_id,
+            "deviceUserId": device_user.device_user_id,
+            "status": device_user.status,
         },
     )
     await _mqtt_publish_json(topic, payload, retain=True, qos=1)

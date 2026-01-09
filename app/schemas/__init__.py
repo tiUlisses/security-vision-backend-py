@@ -45,6 +45,12 @@ from app.schemas.device_topic import (
     DeviceTopicUpdate,
 
 )
+from app.schemas.device_user import (
+    DeviceUserBase,
+    DeviceUserCreate,
+    DeviceUserUpdate,
+    DeviceUserRead,
+)
 
 from app.schemas.tag import (
     TagBase,
@@ -225,6 +231,10 @@ __all__ = [
     "DeviceTopicRead",      # 👈 ADICIONAR
     "DeviceTopicCreate",
     "DeviceTopicUpdate",
+    "DeviceUserBase",
+    "DeviceUserCreate",
+    "DeviceUserUpdate",
+    "DeviceUserRead",
     "DeviceEventRead",
     "AlertEventCreate",
     "AlertEventUpdate",

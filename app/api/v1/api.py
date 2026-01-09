@@ -22,6 +22,7 @@ from app.api.routes import (
     chatwoot_webhooks,
     users,
     locations,
+    device_users,
 )
 
 # 👉 novo import, vindo do pacote app.api.routes.devices
@@ -135,4 +136,9 @@ api_router.include_router(
 api_router.include_router(
     users.router,
     tags=["users"],
+)
+api_router.include_router(
+    device_users.router,
+    prefix="/device-users",
+    tags=["device_users"],
 )
