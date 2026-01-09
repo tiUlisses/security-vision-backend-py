@@ -19,6 +19,11 @@ from app.schemas.location import PersonCurrentLocation
 
 # ⬇️ NOVO: dispatcher genérico de webhooks
 from app.services.webhook_dispatcher import dispatch_generic_webhook
+from app.services.access_control_publisher import (
+    publish_access_control_user_created,
+    publish_access_control_user_deleted,
+    publish_access_control_user_updated,
+)
 
 router = APIRouter()
 
@@ -56,6 +61,7 @@ async def create_person(
             "created_at": created_at.isoformat() if created_at else None,
         },
     )
+    await publish_access_control_user_created(person)
 
     return person
 
@@ -96,6 +102,7 @@ async def update_person(
             "updated_at": updated_at.isoformat() if updated_at else None,
         },
     )
+    await publish_access_control_user_updated(updated)
 
     return updated
 
@@ -120,6 +127,7 @@ async def delete_person(
             "full_name": full_name,
         },
     )
+    await publish_access_control_user_deleted()
 
     return None
 

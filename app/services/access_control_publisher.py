@@ -7,13 +7,11 @@ from datetime import datetime, time
 from typing import Any
 
 from asyncio_mqtt import Client as MQTTClient
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.crud.device_topic import device_topic as crud_device_topic
 from app.models.device import Device
 from app.models.location import Location, LocationRule
-from app.models.user import User
+from app.models.person import Person
 
 logger = logging.getLogger(__name__)
 
@@ -70,34 +68,6 @@ def _parse_avaliable_days(value: str | list[int] | None) -> list[int]:
     return []
 
 
-def _resolve_cpf(user: User) -> str | None:
-    person = getattr(user, "person", None)
-    if person and getattr(person, "document_id", None):
-        return person.document_id
-    document_id = getattr(user, "document_id", None)
-    if document_id:
-        return document_id
-    cpf = getattr(user, "cpf", None)
-    if cpf:
-        return cpf
-    return None
-
-
-def _resolve_phone(user: User) -> str | None:
-    for attr in ("phone", "phone_number", "mobile", "mobile_phone"):
-        value = getattr(user, attr, None)
-        if value:
-            return value
-    return None
-
-
-def _resolve_user_type(user: User) -> str:
-    role = getattr(user, "role", None)
-    if role:
-        return role
-    return "UNKNOWN"
-
-
 def _access_control_topic(*segments: str) -> str:
     base = settings.ACCESS_CONTROL_MQTT_BASE_TOPIC.rstrip("/")
     tenant = _slug(settings.ACCESS_CONTROL_TENANT, "default")
@@ -105,7 +75,19 @@ def _access_control_topic(*segments: str) -> str:
     return "/".join([base, tenant, *cleaned])
 
 
-async def _mqtt_publish_json(topic: str, payload: dict[str, Any], *, retain: bool = True, qos: int = 1) -> None:
+def _build_access_control_envelope(event: str, entity: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event": event,
+        "entity": entity,
+        "source": "central-backend",
+        "payload": payload,
+    }
+
+
+async def _mqtt_publish_raw(topic: str, payload: str, *, retain: bool = True, qos: int = 1) -> None:
+    if not settings.ACCESS_CONTROL_MQTT_ENABLED:
+        logger.debug("[access-control] ACCESS_CONTROL_MQTT_ENABLED=false, não publicando em %s", topic)
+        return
     if not settings.RTLS_MQTT_ENABLED:
         logger.debug("[access-control] RTLS_MQTT_ENABLED=false, não publicando em %s", topic)
         return
@@ -115,11 +97,19 @@ async def _mqtt_publish_json(topic: str, payload: dict[str, Any], *, retain: boo
     username = settings.RTLS_MQTT_USERNAME or None
     password = settings.RTLS_MQTT_PASSWORD or None
 
-    payload_str = json.dumps(payload, ensure_ascii=False)
-    logger.info("[access-control] MQTT publish topic=%s retain=%s payload=%s", topic, retain, payload_str)
+    logger.info("[access-control] MQTT publish topic=%s retain=%s payload=%s", topic, retain, payload)
 
     async with MQTTClient(hostname=host, port=port, username=username, password=password) as client:
-        await client.publish(topic, payload_str, qos=qos, retain=retain)
+        await client.publish(topic, payload, qos=qos, retain=retain)
+
+
+async def _mqtt_publish_json(topic: str, payload: dict[str, Any], *, retain: bool = True, qos: int = 1) -> None:
+    payload_str = json.dumps(payload, ensure_ascii=False)
+    await _mqtt_publish_raw(topic, payload_str, retain=retain, qos=qos)
+
+
+async def _mqtt_publish_empty(topic: str, *, retain: bool = True, qos: int = 1) -> None:
+    await _mqtt_publish_raw(topic, "", retain=retain, qos=qos)
 
 
 def _location_payload(location: Location) -> dict[str, Any]:
@@ -149,28 +139,28 @@ def _location_rule_payload(rule: LocationRule) -> dict[str, Any]:
     }
 
 
-def _user_payload(user: User) -> dict[str, Any]:
-    cpf = _resolve_cpf(user)
-    phone = _resolve_phone(user)
-    user_type = _resolve_user_type(user)
-    if cpf is None:
-        logger.warning("[access-control] user %s sem cpf definido; usando vazio no payload", user.id)
+def _user_payload(person: Person) -> dict[str, Any]:
+    document_id = person.document_id
+    phone = person.phone
+    user_type = person.user_type
+    if document_id is None:
+        logger.warning("[access-control] person %s sem document_id definido; usando vazio no payload", person.id)
     if phone is None:
-        logger.warning("[access-control] user %s sem phone definido; usando vazio no payload", user.id)
-    if user_type == "UNKNOWN":
-        logger.warning("[access-control] user %s sem role definido; user_type=UNKNOWN", user.id)
+        logger.warning("[access-control] person %s sem phone definido; usando vazio no payload", person.id)
+    if user_type is None:
+        logger.warning("[access-control] person %s sem user_type definido", person.id)
 
     return {
-        "id": user.id,
-        "email": user.email,
-        "full_name": user.full_name,
-        "role": user.role,
-        "user_type": user_type,
-        "cpf": cpf or "",
+        "id": person.id,
+        "email": person.email,
+        "full_name": person.full_name,
+        "document_id": document_id or "",
+        "cpf": document_id or "",
         "phone": phone or "",
-        "is_active": user.is_active,
-        "created_at": _serialize_datetime(user.created_at),
-        "updated_at": _serialize_datetime(user.updated_at),
+        "user_type": user_type if user_type is not None else "UNKNOWN",
+        "is_active": person.active,
+        "created_at": _serialize_datetime(person.created_at),
+        "updated_at": _serialize_datetime(person.updated_at),
     }
 
 
@@ -193,85 +183,124 @@ def _device_payload(device: Device) -> dict[str, Any]:
 
 
 async def publish_access_control_location_created(location: Location) -> tuple[str, dict[str, Any]]:
-    topic = _access_control_topic("location", str(location.id), "created")
-    payload = {
-        "event": "created",
-        "location": _location_payload(location),
-    }
+    topic = _access_control_topic("locations", "created")
+    payload = _build_access_control_envelope("created", "location", _location_payload(location))
     await _mqtt_publish_json(topic, payload, retain=True, qos=1)
     return topic, payload
 
 
-async def publish_access_control_user_created(user: User) -> tuple[str, dict[str, Any]]:
-    topic = _access_control_topic("user", str(user.id), "created")
-    payload = {
-        "event": "created",
-        "user": _user_payload(user),
-    }
+async def publish_access_control_location_updated(location: Location) -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("locations", "updated")
+    payload = _build_access_control_envelope("updated", "location", _location_payload(location))
     await _mqtt_publish_json(topic, payload, retain=True, qos=1)
     return topic, payload
+
+
+async def publish_access_control_location_deleted() -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("locations", "deleted")
+    await _mqtt_publish_empty(topic, retain=True, qos=1)
+    return topic, {}
+
+
+async def publish_access_control_user_created(person: Person) -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("users", "created")
+    payload = _build_access_control_envelope("created", "user", _user_payload(person))
+    await _mqtt_publish_json(topic, payload, retain=True, qos=1)
+    return topic, payload
+
+
+async def publish_access_control_user_updated(person: Person) -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("users", "updated")
+    payload = _build_access_control_envelope("updated", "user", _user_payload(person))
+    await _mqtt_publish_json(topic, payload, retain=True, qos=1)
+    return topic, payload
+
+
+async def publish_access_control_user_deleted() -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("users", "deleted")
+    await _mqtt_publish_empty(topic, retain=True, qos=1)
+    return topic, {}
 
 
 async def publish_access_control_location_rule_created(rule: LocationRule) -> tuple[str, dict[str, Any]]:
-    topic = _access_control_topic("location_rule", str(rule.id), "created")
-    payload = {
-        "event": "created",
-        "location_rule": _location_rule_payload(rule),
-    }
+    topic = _access_control_topic("locations-rules", "created")
+    payload = _build_access_control_envelope("created", "location_rule", _location_rule_payload(rule))
     await _mqtt_publish_json(topic, payload, retain=True, qos=1)
     return topic, payload
+
+
+async def publish_access_control_location_rule_updated(rule: LocationRule) -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("locations-rules", "updated")
+    payload = _build_access_control_envelope("updated", "location_rule", _location_rule_payload(rule))
+    await _mqtt_publish_json(topic, payload, retain=True, qos=1)
+    return topic, payload
+
+
+async def publish_access_control_location_rule_deleted() -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("locations-rules", "deleted")
+    await _mqtt_publish_empty(topic, retain=True, qos=1)
+    return topic, {}
 
 
 async def publish_access_control_device_created(
-    db: AsyncSession,
     device: Device,
 ) -> tuple[str, dict[str, Any]]:
-    topic = _access_control_topic("device", str(device.id), "created")
-    payload = {
-        "event": "created",
-        "device": _device_payload(device),
-    }
+    topic = _access_control_topic("devices", "created")
+    payload = _build_access_control_envelope("created", "device", _device_payload(device))
     await _mqtt_publish_json(topic, payload, retain=True, qos=1)
-
-    await crud_device_topic.upsert(
-        db,
-        device_id=device.id,
-        kind="access_control_device_created",
-        topic=topic,
-        description="Access control device created event",
-    )
-    await db.commit()
-
     return topic, payload
+
+
+async def publish_access_control_device_updated(
+    device: Device,
+) -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("devices", "updated")
+    payload = _build_access_control_envelope("updated", "device", _device_payload(device))
+    await _mqtt_publish_json(topic, payload, retain=True, qos=1)
+    return topic, payload
+
+
+async def publish_access_control_device_deleted() -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("devices", "deleted")
+    await _mqtt_publish_empty(topic, retain=True, qos=1)
+    return topic, {}
 
 
 async def publish_access_control_device_user_created(
     device_id: int,
-    user_id: int,
+    person_id: int,
 ) -> tuple[str, dict[str, Any]]:
-    topic = _access_control_topic("device_user", f"{device_id}-{user_id}", "created")
-    payload = {
-        "event": "created",
-        "device_user": {
+    topic = _access_control_topic("device-users", "created")
+    payload = _build_access_control_envelope(
+        "created",
+        "device_user",
+        {
             "device_id": device_id,
-            "user_id": user_id,
+            "person_id": person_id,
         },
-    }
+    )
     await _mqtt_publish_json(topic, payload, retain=True, qos=1)
     return topic, payload
 
 
-async def disable_access_control_topics_for_device(
-    db: AsyncSession,
+async def publish_access_control_device_user_updated(
     device_id: int,
-) -> None:
-    topics = await crud_device_topic.list_by_device(db, device_id=device_id, only_active=True)
-    if not topics:
-        return
+    person_id: int,
+) -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("device-users", "updated")
+    payload = _build_access_control_envelope(
+        "updated",
+        "device_user",
+        {
+            "device_id": device_id,
+            "person_id": person_id,
+        },
+    )
+    await _mqtt_publish_json(topic, payload, retain=True, qos=1)
+    return topic, payload
 
-    for t in topics:
-        if t.kind == "access_control_device_created":
-            await _mqtt_publish_json(t.topic, {"enabled": False}, retain=True, qos=1)
 
-    await crud_device_topic.mark_all_inactive(db, device_id=device_id)
-    await db.commit()
+async def publish_access_control_device_user_deleted() -> tuple[str, dict[str, Any]]:
+    topic = _access_control_topic("device-users", "deleted")
+    await _mqtt_publish_empty(topic, retain=True, qos=1)
+    return topic, {}

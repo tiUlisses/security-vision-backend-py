@@ -19,6 +19,14 @@ from app.schemas.location import (
     LocationUpdate,
 )
 from app.services.access_control_projection import publish_projection_for_location
+from app.services.access_control_publisher import (
+    publish_access_control_location_created,
+    publish_access_control_location_deleted,
+    publish_access_control_location_rule_created,
+    publish_access_control_location_rule_deleted,
+    publish_access_control_location_rule_updated,
+    publish_access_control_location_updated,
+)
 
 router = APIRouter()
 
@@ -64,6 +72,7 @@ async def create_location(
     floors = await _load_floors(db, location_in.floor_ids)
     location = await crud_location.create_with_floors(db, obj_in=location_in, floors=floors)
     await publish_projection_for_location(db, location)
+    await publish_access_control_location_created(location)
     return _to_location_read(location)
 
 
@@ -92,6 +101,7 @@ async def update_location(
         await _load_floors(db, location_in.floor_ids)
     updated = await crud_location.update_with_floors(db, db_obj=location, obj_in=location_in)
     await publish_projection_for_location(db, updated)
+    await publish_access_control_location_updated(updated)
     return _to_location_read(updated)
 
 
@@ -103,6 +113,8 @@ async def delete_location(
     deleted = await crud_location.remove(db, id=location_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Location not found")
+    await publish_access_control_location_deleted()
+    return None
 
 
 @router.get("/{location_id}/rules", response_model=List[LocationRuleRead])
@@ -126,7 +138,9 @@ async def create_location_rule(
     location = await crud_location.get(db, id=location_id)
     if not location:
         raise HTTPException(status_code=404, detail="Location not found")
-    return await crud_location_rule.create(db, obj_in=rule_in)
+    created = await crud_location_rule.create(db, obj_in=rule_in)
+    await publish_access_control_location_rule_created(created)
+    return created
 
 
 @router.put("/rules/{rule_id}", response_model=LocationRuleRead)
@@ -138,7 +152,9 @@ async def update_location_rule(
     rule = await crud_location_rule.get(db, id=rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="Location rule not found")
-    return await crud_location_rule.update(db, db_obj=rule, obj_in=rule_in)
+    updated = await crud_location_rule.update(db, db_obj=rule, obj_in=rule_in)
+    await publish_access_control_location_rule_updated(updated)
+    return updated
 
 
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -149,3 +165,5 @@ async def delete_location_rule(
     deleted = await crud_location_rule.remove(db, id=rule_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Location rule not found")
+    await publish_access_control_location_rule_deleted()
+    return None
