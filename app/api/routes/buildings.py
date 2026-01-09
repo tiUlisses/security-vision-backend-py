@@ -11,6 +11,7 @@ from app.schemas import BuildingCreate, BuildingRead, BuildingUpdate, FloorPlanR
 
 # 🔔 dispatcher genérico de webhooks (mesmo que usamos em devices/people/tags)
 from app.services.webhook_dispatcher import dispatch_generic_webhook
+from app.services.access_control_projection import publish_projection_for_building
 
 router = APIRouter()
 
@@ -55,6 +56,8 @@ async def create_building(
             "created_at": created_at.isoformat() if created_at else None,
         },
     )
+
+    await publish_projection_for_building(db, building)
 
     return building
 
@@ -122,6 +125,8 @@ async def update_building(
             "updated_at": updated_at.isoformat() if updated_at else None,
         },
     )
+
+    await publish_projection_for_building(db, updated)
 
     return updated
 
