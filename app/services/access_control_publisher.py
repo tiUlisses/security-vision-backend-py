@@ -68,6 +68,17 @@ def _parse_avaliable_days(value: str | list[int] | None) -> list[int]:
     return []
 
 
+def _resolve_device_location_id(device: Device) -> int | None:
+    if device.location_id is not None:
+        return device.location_id
+    floor = getattr(device, "floor", None)
+    if floor and getattr(floor, "locations", None):
+        for location in floor.locations:
+            if location and getattr(location, "id", None) is not None:
+                return location.id
+    return None
+
+
 def _access_control_topic(*segments: str) -> str:
     base = settings.ACCESS_CONTROL_MQTT_BASE_TOPIC.rstrip("/")
     tenant = _slug(settings.ACCESS_CONTROL_TENANT, "default")
@@ -165,6 +176,7 @@ def _user_payload(person: Person) -> dict[str, Any]:
 
 
 def _device_payload(device: Device) -> dict[str, Any]:
+    serial_number = device.code or device.mac_address
     return {
         "id": device.id,
         "name": device.name,
@@ -177,6 +189,11 @@ def _device_payload(device: Device) -> dict[str, Any]:
         "username": device.username,
         "building_id": device.building_id,
         "floor_id": device.floor_id,
+        "brand": device.manufacturer,
+        "category": device.type,
+        "serialNumber": serial_number,
+        "config": device.analytics or {},
+        "locationId": _resolve_device_location_id(device),
         "created_at": _serialize_datetime(device.created_at),
         "updated_at": _serialize_datetime(device.updated_at),
     }

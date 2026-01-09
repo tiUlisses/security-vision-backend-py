@@ -29,6 +29,7 @@ class DeviceBase(BaseModel):
     # Associação lógica ao prédio/andar
     building_id: Optional[int] = None
     floor_id: Optional[int] = None
+    location_id: Optional[int] = None
 
     # NOVO: fabricante, modelo shard e Analytics
     manufacturer: Optional[str] = Field(None, max_length=128)
@@ -72,6 +73,7 @@ class DeviceUpdate(BaseModel):
     # Associação prédio/andar
     building_id: Optional[int] = None
     floor_id: Optional[int] = None
+    location_id: Optional[int] = None
 
     # NOVO
     manufacturer: Optional[str] = Field(None, max_length=128)
@@ -112,6 +114,7 @@ class DeviceStatusRead(BaseModel):
 
     building_id: Optional[int] = None
     floor_id: Optional[int] = None
+    location_id: Optional[int] = None
 
     manufacturer: Optional[str] = None
     model: Optional[str] = None

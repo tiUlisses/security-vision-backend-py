@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from app.models.floor import Floor
     from app.models.device_event import DeviceEvent  # 👈 novo
     from app.models.incident import Incident
+    from app.models.location import Location
 
 
 class Device(Base):
@@ -38,6 +39,11 @@ class Device(Base):
     )
     floor_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("floors.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    location_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("locations.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
@@ -102,6 +108,7 @@ class Device(Base):
 
     building: Mapped[Optional["Building"]] = relationship("Building")
     floor: Mapped[Optional["Floor"]] = relationship("Floor")
+    location: Mapped[Optional["Location"]] = relationship("Location")
 
     collection_logs: Mapped[List["CollectionLog"]] = relationship(
         back_populates="device",
