@@ -180,6 +180,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     ACCESS_CONTROL_MQTT_ENABLED: bool = True
     ACCESS_CONTROL_MQTT_TOPIC: str = "security-vision/access-control/locations"
+    ACCESS_CONTROL_MQTT_BASE_TOPIC: str = "security-vision/access-control"
+    ACCESS_CONTROL_TENANT: str = "default"
 
     # ------------------------------------------------------------------
     # MQTT do RTLS (gateways BLE, etc.)

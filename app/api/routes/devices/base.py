@@ -18,7 +18,8 @@ from app.services.cambus_publisher import (
 )
 from app.services.access_control_publisher import (
     publish_access_control_device_created,
-    disable_access_control_topics_for_device,
+    publish_access_control_device_deleted,
+    publish_access_control_device_updated,
 )
 from app.core.config import settings
 from app.crud import device as crud_device
@@ -152,15 +153,14 @@ async def create_device(
             exc,
         )
 
-    if getattr(device, "type", None) == "ACCESS_CONTROLLER":
-        try:
-            await publish_access_control_device_created(db, device)
-        except Exception as exc:
-            logger.exception(
-                "[devices] erro ao publicar evento access-control (create) device_id=%s: %s",
-                device.id,
-                exc,
-            )
+    try:
+        await publish_access_control_device_created(device)
+    except Exception as exc:
+        logger.exception(
+            "[devices] erro ao publicar evento access-control (create) device_id=%s: %s",
+            device.id,
+            exc,
+        )
 
     return device
 
@@ -266,25 +266,14 @@ async def update_device(
                 exc,
             )
 
-    if old_type == "ACCESS_CONTROLLER" and getattr(updated, "type", None) != "ACCESS_CONTROLLER":
-        try:
-            await disable_access_control_topics_for_device(db, device_id=updated.id)
-        except Exception as exc:
-            logger.exception(
-                "[devices] erro ao desabilitar tópicos access-control (update) device_id=%s: %s",
-                updated.id,
-                exc,
-            )
-
-    if getattr(updated, "type", None) == "ACCESS_CONTROLLER":
-        try:
-            await publish_access_control_device_created(db, updated)
-        except Exception as exc:
-            logger.exception(
-                "[devices] erro ao publicar evento access-control (update) device_id=%s: %s",
-                updated.id,
-                exc,
-            )
+    try:
+        await publish_access_control_device_updated(updated)
+    except Exception as exc:
+        logger.exception(
+            "[devices] erro ao publicar evento access-control (update) device_id=%s: %s",
+            updated.id,
+            exc,
+        )
 
     return updated
 
@@ -313,15 +302,14 @@ async def delete_device(
                 exc,
             )
 
-    if getattr(db_obj, "type", None) == "ACCESS_CONTROLLER":
-        try:
-            await disable_access_control_topics_for_device(db, device_id=db_obj.id)
-        except Exception as exc:
-            logger.exception(
-                "[devices] erro ao desabilitar tópicos access-control (delete) device_id=%s: %s",
-                db_obj.id,
-                exc,
-            )
+    try:
+        await publish_access_control_device_deleted()
+    except Exception as exc:
+        logger.exception(
+            "[devices] erro ao publicar evento access-control (delete) device_id=%s: %s",
+            db_obj.id,
+            exc,
+        )
 
     deleted = await crud_device.remove(db, id=device_id)
     if not deleted:
