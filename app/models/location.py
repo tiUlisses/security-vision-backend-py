@@ -26,7 +26,7 @@ class Location(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("ACTIVE"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'ACTIVE'"))
 
     created_at: Mapped[datetime] = mapped_column(
         server_default=text("CURRENT_TIMESTAMP"),
@@ -62,7 +62,7 @@ class LocationRule(Base):
     avaliable_days: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("ACTIVE"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'ACTIVE'"))
     validate: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("TRUE"))
 
     created_at: Mapped[datetime] = mapped_column(

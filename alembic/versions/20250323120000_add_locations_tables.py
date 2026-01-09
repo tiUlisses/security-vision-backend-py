@@ -21,7 +21,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column("description", sa.String(length=1024), nullable=True),
-        sa.Column("status", sa.String(length=32), server_default="ACTIVE", nullable=False),
+        sa.Column("status", sa.String(length=32), server_default=sa.text("'ACTIVE'"), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(),
@@ -64,7 +64,7 @@ def upgrade() -> None:
         sa.Column("avaliable_days", sa.String(length=64), nullable=True),
         sa.Column("start_time", sa.Time(), nullable=True),
         sa.Column("end_time", sa.Time(), nullable=True),
-        sa.Column("status", sa.String(length=32), server_default="ACTIVE", nullable=False),
+        sa.Column("status", sa.String(length=32), server_default=sa.text("'ACTIVE'"), nullable=False),
         sa.Column(
             "validate",
             sa.Boolean(),
