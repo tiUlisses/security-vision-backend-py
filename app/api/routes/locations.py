@@ -18,6 +18,7 @@ from app.schemas.location import (
     LocationRuleUpdate,
     LocationUpdate,
 )
+from app.services.access_control_projection import publish_projection_for_location
 
 router = APIRouter()
 
@@ -62,6 +63,7 @@ async def create_location(
 ):
     floors = await _load_floors(db, location_in.floor_ids)
     location = await crud_location.create_with_floors(db, obj_in=location_in, floors=floors)
+    await publish_projection_for_location(db, location)
     return _to_location_read(location)
 
 
@@ -89,6 +91,7 @@ async def update_location(
     if location_in.floor_ids is not None:
         await _load_floors(db, location_in.floor_ids)
     updated = await crud_location.update_with_floors(db, db_obj=location, obj_in=location_in)
+    await publish_projection_for_location(db, updated)
     return _to_location_read(updated)
 
 

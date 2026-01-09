@@ -176,10 +176,10 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
-    # Access Control (controle de acesso via MQTT)
+    # Access-Control / Vision-Controller (projeção de ambientes)
     # ------------------------------------------------------------------
-    ACCESS_CONTROL_MQTT_BASE_TOPIC: str = "security-vision/access-control"
-    ACCESS_CONTROL_TENANT: str = "default"
+    ACCESS_CONTROL_MQTT_ENABLED: bool = True
+    ACCESS_CONTROL_MQTT_TOPIC: str = "security-vision/access-control/locations"
 
     # ------------------------------------------------------------------
     # MQTT do RTLS (gateways BLE, etc.)

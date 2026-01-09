@@ -21,6 +21,7 @@ from app.schemas import (
     FloorPlanUpdate,
     DeviceRead,
 )
+from app.services.access_control_projection import publish_projection_for_floor_plan
 
 router = APIRouter()
 
@@ -43,7 +44,9 @@ async def create_floor_plan(
     floor_plan_in: FloorPlanCreate,
     db: AsyncSession = Depends(get_db_session),
 ):
-    return await crud_floor_plan.create(db, floor_plan_in)
+    floor_plan = await crud_floor_plan.create(db, floor_plan_in)
+    await publish_projection_for_floor_plan(db, floor_plan)
+    return floor_plan
 
 
 @router.get("/{floor_plan_id}", response_model=FloorPlanRead)
@@ -66,7 +69,9 @@ async def update_floor_plan(
     db_obj = await crud_floor_plan.get(db, id=floor_plan_id)
     if not db_obj:
         raise HTTPException(status_code=404, detail="Floor plan not found")
-    return await crud_floor_plan.update(db, db_obj, floor_plan_in)
+    updated = await crud_floor_plan.update(db, db_obj, floor_plan_in)
+    await publish_projection_for_floor_plan(db, updated)
+    return updated
 
 
 @router.delete("/{floor_plan_id}", status_code=status.HTTP_204_NO_CONTENT)
