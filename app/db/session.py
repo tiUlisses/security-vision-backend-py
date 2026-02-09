@@ -1,12 +1,14 @@
 # app/db/session.py
 
+import os
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
-from app.db.base import Base  # 🔴 ajuste o import se o seu Base estiver em outro módulo
+from app.db.base import Base
 
 
 # ----------------------------------------------------------------------
@@ -14,8 +16,14 @@ from app.db.base import Base  # 🔴 ajuste o import se o seu Base estiver em ou
 # ----------------------------------------------------------------------
 engine_kwargs = {
     "future": True,
-    "echo": False,  # coloque True se quiser ver o SQL no log
+    "echo": False,
 }
+
+# Em ambientes de teste/CI evitamos pool para não reutilizar conexões
+# asyncpg entre event loops diferentes (erro: "attached to a different loop"
+# / "another operation is in progress").
+if os.getenv("SV_DB_NULL_POOL", "").lower() in {"1", "true", "yes"} or os.getenv("GITHUB_ACTIONS") == "true":
+    engine_kwargs["poolclass"] = NullPool
 
 engine = create_async_engine(
     settings.database_url,
@@ -29,7 +37,6 @@ AsyncSessionLocal = sessionmaker(
     bind=engine,
     class_=AsyncSession,
     expire_on_commit=False,
-    
 )
 
 

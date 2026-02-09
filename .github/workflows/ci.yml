@@ -38,6 +38,7 @@ jobs:
       ACCESS_CONTROL_MQTT_ENABLED: "false"
       PRESENCE_ROLLUP_ENABLED: "false"
       RUN_MIGRATIONS: "0"
+      SV_DB_NULL_POOL: "true"
       PYTEST_ASYNCIO_MODE: "auto"
       PYTEST_ASYNCIO_DEFAULT_FIXTURE_LOOP_SCOPE: "session"
 
