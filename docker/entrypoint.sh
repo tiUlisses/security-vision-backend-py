@@ -6,7 +6,7 @@ if [ "${DB_WAIT:-1}" = "1" ]; then
 fi
 
 if [ "${RUN_MIGRATIONS:-1}" = "1" ]; then
-  echo "[entrypoint] Running alembic migrations (upgrade head)..."
+  echo "[entrypoint] Running alembic migrations (upgrade heads)..."
   alembic upgrade heads
 fi
 
