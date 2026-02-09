@@ -108,9 +108,6 @@ jobs:
           asyncio.run(init_db())
           PY
 
-      - name: Run migrations
-        run: alembic upgrade heads
-
       - name: Run tests
         run: |
           if [ -d testes ] || [ -d tests ]; then
