@@ -7,7 +7,7 @@ fi
 
 if [ "${RUN_MIGRATIONS:-1}" = "1" ]; then
   echo "[entrypoint] Running alembic migrations (upgrade head)..."
-  alembic upgrade head
+  alembic upgrade heads
 fi
 
 exec "$@"

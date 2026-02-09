@@ -100,7 +100,7 @@ jobs:
           fi
 
       - name: Run migrations
-        run: alembic upgrade head
+        run: alembic upgrade heads
 
       - name: Run tests
         run: |
