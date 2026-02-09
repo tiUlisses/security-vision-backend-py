@@ -43,4 +43,9 @@ jobs:
         run: docker build --target dev -t securityvision-backend:ci-dev .
 
       - name: Smoke test prod image
-        run: docker run --rm securityvision-backend:ci-prod python -c "import app.main; print('app import ok')"
+        run: |
+          docker run --rm \
+            -e DB_WAIT=0 \
+            -e RUN_MIGRATIONS=0 \
+            securityvision-backend:ci-prod \
+            python -c "import app.main; print('app import ok')"
