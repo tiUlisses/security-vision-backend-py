@@ -311,6 +311,14 @@ class MqttIngestor:
     # Main message handler
     # ------------------------------------------------------------------
 
+    async def process_message(self, payload: bytes, topic: Optional[str] = None) -> None:
+        """Compat wrapper usado pelos testes legados.
+
+        Quando o tópico não é informado, usa um tópico padrão no formato legacy.
+        """
+        effective_topic = topic or f"{self.settings.MQTT_GATEWAY_TOPIC_PREFIX.rstrip('/')}/test-gateway/status"
+        await self.handle_message(effective_topic, payload)
+
     async def handle_message(self, topic: str, payload: bytes) -> None:
         # asyncio-mqtt may provide a Topic object; normalize to str
         topic = str(topic)
