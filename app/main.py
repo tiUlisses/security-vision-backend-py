@@ -1,6 +1,7 @@
 # app/main.py
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -20,9 +21,67 @@ from app.services.presence_rollup import run_rollup_loop
 
 logger = logging.getLogger("rtls.main")
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global _mqtt_task, _cambus_task, _presence_rollup_task
+
+    await init_db()
+    await _bootstrap_superadmin()
+
+    if settings.MQTT_ENABLED:
+        logger.info("Starting MQTT ingestor task...")
+        ingestor = MqttIngestor(settings=settings)
+        _mqtt_task = asyncio.create_task(ingestor.run())
+
+    if settings.CAMBUS_MQTT_ENABLED:
+        logger.info("Starting CAM-BUS event collector task...")
+        _cambus_task = asyncio.create_task(
+            run_cambus_event_collector(),
+            name="cambus_event_collector",
+        )
+
+    if settings.PRESENCE_ROLLUP_ENABLED:
+        logger.info("Starting presence rollup task...")
+        _presence_rollup_task = asyncio.create_task(
+            run_rollup_loop(
+                retention_days=settings.PRESENCE_LOG_RETENTION_DAYS,
+                interval_minutes=settings.PRESENCE_ROLLUP_INTERVAL_MINUTES,
+            ),
+            name="presence_rollup",
+        )
+
+    try:
+        yield
+    finally:
+        if _mqtt_task:
+            logger.info("Stopping MQTT ingestor task...")
+            _mqtt_task.cancel()
+            try:
+                await _mqtt_task
+            except asyncio.CancelledError:
+                logger.info("MQTT ingestor task cancelled")
+
+        if _cambus_task:
+            logger.info("Stopping CAM-BUS event collector task...")
+            _cambus_task.cancel()
+            try:
+                await _cambus_task
+            except asyncio.CancelledError:
+                logger.info("CAM-BUS event collector task cancelled")
+
+        if _presence_rollup_task:
+            logger.info("Stopping presence rollup task...")
+            _presence_rollup_task.cancel()
+            try:
+                await _presence_rollup_task
+            except asyncio.CancelledError:
+                logger.info("Presence rollup task cancelled")
+
+
 app = FastAPI(
     title=settings.APP_NAME,
     version="0.1.0",
+    lifespan=lifespan,
 )
 origins = ["*"]
 
@@ -46,7 +105,7 @@ app.mount(
 )
 
 _mqtt_task: asyncio.Task | None = None
-_cambus_task: asyncio.Task | None = None   # 👈 NOVO
+_cambus_task: asyncio.Task | None = None
 _presence_rollup_task: asyncio.Task | None = None
 
 
@@ -81,71 +140,6 @@ async def _bootstrap_superadmin() -> None:
             hashed_password=pwd_hash,
         )
         logger.info("Superadmin %s criado com sucesso", settings.SUPERADMIN_EMAIL)
-
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    global _mqtt_task, _cambus_task, _presence_rollup_task
-
-    await init_db()
-
-    await _bootstrap_superadmin()
-
-    # 👇 Ingestor de gateways RTLS (já existia)
-    if settings.MQTT_ENABLED:
-        logger.info("Starting MQTT ingestor task...")
-        ingestor = MqttIngestor(settings=settings)
-        _mqtt_task = asyncio.create_task(ingestor.run())
-
-    # 👇 Coletor de eventos do CAM-BUS (câmeras)
-    if settings.CAMBUS_MQTT_ENABLED:
-        logger.info("Starting CAM-BUS event collector task...")
-        _cambus_task = asyncio.create_task(
-            run_cambus_event_collector(),
-            name="cambus_event_collector",
-        )
-
-    if settings.PRESENCE_ROLLUP_ENABLED:
-        logger.info("Starting presence rollup task...")
-        _presence_rollup_task = asyncio.create_task(
-            run_rollup_loop(
-                retention_days=settings.PRESENCE_LOG_RETENTION_DAYS,
-                interval_minutes=settings.PRESENCE_ROLLUP_INTERVAL_MINUTES,
-            ),
-            name="presence_rollup",
-        )
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    global _mqtt_task, _cambus_task, _presence_rollup_task
-
-    # Para o ingestor de gateways
-    if _mqtt_task:
-        logger.info("Stopping MQTT ingestor task...")
-        _mqtt_task.cancel()
-        try:
-            await _mqtt_task
-        except asyncio.CancelledError:
-            logger.info("MQTT ingestor task cancelled")
-
-    # Para o coletor do CAM-BUS
-    if _cambus_task:
-        logger.info("Stopping CAM-BUS event collector task...")
-        _cambus_task.cancel()
-        try:
-            await _cambus_task
-        except asyncio.CancelledError:
-            logger.info("CAM-BUS event collector task cancelled")
-
-    if _presence_rollup_task:
-        logger.info("Stopping presence rollup task...")
-        _presence_rollup_task.cancel()
-        try:
-            await _presence_rollup_task
-        except asyncio.CancelledError:
-            logger.info("Presence rollup task cancelled")
-
 
 @app.get("/health", tags=["health"])
 async def healthcheck():

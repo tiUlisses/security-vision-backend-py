@@ -38,6 +38,8 @@ jobs:
       ACCESS_CONTROL_MQTT_ENABLED: "false"
       PRESENCE_ROLLUP_ENABLED: "false"
       RUN_MIGRATIONS: "0"
+      PYTEST_ASYNCIO_MODE: "auto"
+      PYTEST_ASYNCIO_DEFAULT_FIXTURE_LOOP_SCOPE: "session"
 
     steps:
       - name: Checkout
@@ -96,6 +98,9 @@ jobs:
           else
             echo "mypy not configured, skipping"
           fi
+
+      - name: Run migrations
+        run: alembic upgrade head
 
       - name: Run tests
         run: |
