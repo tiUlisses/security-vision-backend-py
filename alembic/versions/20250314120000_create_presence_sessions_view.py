@@ -73,7 +73,19 @@ GROUP BY device_id, tag_id, session_group;
 
 def upgrade() -> None:
     gap_seconds = _gap_seconds()
-    op.execute(VIEW_SQL_TEMPLATE.format(gap_seconds=gap_seconds))
+    view_sql = VIEW_SQL_TEMPLATE.format(gap_seconds=gap_seconds).replace("'", "''")
+    op.execute(
+        f"""
+DO $$
+BEGIN
+    IF to_regclass('public.collection_logs') IS NOT NULL THEN
+        EXECUTE '{view_sql}';
+    ELSE
+        RAISE NOTICE 'Skipping presence_sessions view creation: collection_logs table not found';
+    END IF;
+END $$;
+"""
+    )
 
 
 def downgrade() -> None:

@@ -275,7 +275,7 @@ Se quiser migrations reais:
 
 ```bash
 alembic revision --autogenerate -m "initial"
-alembic upgrade head
+alembic upgrade heads
 ```
 
 ---
