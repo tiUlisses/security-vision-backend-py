@@ -99,6 +99,15 @@ jobs:
             echo "mypy not configured, skipping"
           fi
 
+      - name: Bootstrap schema (create_all)
+        run: |
+          python - <<'PY'
+          import asyncio
+          from app.db.session import init_db
+
+          asyncio.run(init_db())
+          PY
+
       - name: Run migrations
         run: alembic upgrade heads
 
